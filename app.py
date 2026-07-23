@@ -296,8 +296,8 @@ if menu in ["Dashboard","Detalle de OTs"]:
             "OBSERVACIONES","DURACION_H","CANT_PERSONAS","HH"]
     st.dataframe(filtered[cols],use_container_width=True,hide_index=True,
         column_config={
-            "AVANCE_REAL":st.column_config.ProgressColumn("Avance real",0,100,format="%.0f%%"),
-            "CUMPLIMIENTO":st.column_config.ProgressColumn("Cumplimiento",0,100,format="%.0f%%"),
+            "AVANCE_REAL":st.column_config.ProgressColumn("Avance real", min_value=0, max_value=100, format="%.0f%%"),
+            "CUMPLIMIENTO":st.column_config.ProgressColumn("Cumplimiento", min_value=0, max_value=100, format="%.0f%%"),
         })
 
 if menu == "Exportar reporte":
