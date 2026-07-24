@@ -561,6 +561,162 @@ if page == "Dashboard ejecutivo":
             st.plotly_chart(fig4, use_container_width=True)
 
 
+        st.markdown("---")
+        st.subheader("Detalle de actividades y avances")
+
+        table_data = status.copy()
+
+        if not ots.empty:
+            table_data = table_data.merge(
+                ots[["id", "ot", "equipo", "descripcion"]],
+                left_on="ot_id",
+                right_on="id",
+                how="left",
+                suffixes=("", "_ot"),
+            )
+
+        table_data["ot"] = table_data["ot"].astype(str)
+        table_data["avance_real"] = pd.to_numeric(
+            table_data["avance_real"], errors="coerce"
+        ).fillna(0)
+
+        table_data["estado"] = table_data["avance_real"].apply(
+            lambda value: (
+                "CULMINADO"
+                if value >= 100
+                else ("NO INICIADO" if value <= 0 else "EN EJECUCIÓN")
+            )
+        )
+
+        available_ots = sorted(table_data["ot"].dropna().unique().tolist())
+        available_groups = sorted(
+            [
+                value for value in table_data["grupo"].dropna().astype(str).unique().tolist()
+                if value.strip()
+            ]
+        )
+        available_supervisors = sorted(
+            [
+                value for value in table_data["supervisor"].dropna().astype(str).unique().tolist()
+                if value.strip()
+            ]
+        )
+
+        f1, f2, f3, f4 = st.columns(4)
+        selected_table_ot = f1.multiselect(
+            "Filtrar OT",
+            available_ots,
+            placeholder="Todas las OTs",
+        )
+        selected_table_group = f2.multiselect(
+            "Filtrar grupo",
+            available_groups,
+            placeholder="Todos los grupos",
+        )
+        selected_table_supervisor = f3.multiselect(
+            "Filtrar supervisor",
+            available_supervisors,
+            placeholder="Todos los supervisores",
+        )
+        selected_table_state = f4.multiselect(
+            "Filtrar estado",
+            ["CULMINADO", "EN EJECUCIÓN", "NO INICIADO"],
+            placeholder="Todos los estados",
+        )
+
+        filtered_table = table_data.copy()
+        if selected_table_ot:
+            filtered_table = filtered_table[
+                filtered_table["ot"].isin(selected_table_ot)
+            ]
+        if selected_table_group:
+            filtered_table = filtered_table[
+                filtered_table["grupo"].astype(str).isin(selected_table_group)
+            ]
+        if selected_table_supervisor:
+            filtered_table = filtered_table[
+                filtered_table["supervisor"].astype(str).isin(selected_table_supervisor)
+            ]
+        if selected_table_state:
+            filtered_table = filtered_table[
+                filtered_table["estado"].isin(selected_table_state)
+            ]
+
+        display_columns = [
+            "ot",
+            "grupo",
+            "codigo_actividad",
+            "descripcion",
+            "supervisor",
+            "inicio_plan",
+            "avance_real",
+            "descripcion_avance",
+            "observaciones",
+            "personal",
+            "duracion_h",
+            "hh_plan",
+            "estado",
+        ]
+        display_columns = [
+            column for column in display_columns if column in filtered_table.columns
+        ]
+
+        st.dataframe(
+            filtered_table[display_columns].sort_values(
+                ["ot", "codigo_actividad"]
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+            column_config={
+                "ot": st.column_config.TextColumn("OT"),
+                "grupo": st.column_config.TextColumn("GRUPO"),
+                "codigo_actividad": st.column_config.TextColumn("ACTIVIDAD"),
+                "descripcion": st.column_config.TextColumn(
+                    "DESCRIPCIÓN DE ACTIVIDAD",
+                    width="large",
+                ),
+                "supervisor": st.column_config.TextColumn("SUPERVISOR"),
+                "inicio_plan": st.column_config.DateColumn(
+                    "INICIO",
+                    format="DD/MM/YYYY",
+                ),
+                "avance_real": st.column_config.ProgressColumn(
+                    "AVANCE REAL",
+                    min_value=0,
+                    max_value=100,
+                    format="%d%%",
+                ),
+                "descripcion_avance": st.column_config.TextColumn(
+                    "DESCRIPCIÓN DEL AVANCE",
+                    width="large",
+                ),
+                "observaciones": st.column_config.TextColumn(
+                    "OBSERVACIONES",
+                    width="large",
+                ),
+                "personal": st.column_config.NumberColumn(
+                    "PERSONAL",
+                    format="%.0f",
+                ),
+                "duracion_h": st.column_config.NumberColumn(
+                    "DURACIÓN (H)",
+                    format="%.1f",
+                ),
+                "hh_plan": st.column_config.NumberColumn(
+                    "HH PLAN",
+                    format="%.1f",
+                ),
+                "estado": st.column_config.TextColumn("ESTADO"),
+            },
+        )
+
+        st.caption(
+            f"Mostrando {len(filtered_table)} actividades de "
+            f"{len(table_data)} registradas."
+        )
+
+
 if page == "Detalle por OT":
     if ots.empty:
         st.info("No existen OTs.")
