@@ -115,6 +115,11 @@ def load_model():
     activities = read_table("actividades")
     progress = read_table("avances_actividad")
 
+    if not ots.empty and "ot" in ots.columns:
+        ots["ot"] = ots["ot"].astype(str)
+    if not activities.empty and "codigo_actividad" in activities.columns:
+        activities["codigo_actividad"] = activities["codigo_actividad"].astype(str)
+
     if not progress.empty and "fecha_registro" in progress.columns:
         progress["fecha_registro"] = pd.to_datetime(
             progress["fecha_registro"], errors="coerce", utc=True
@@ -163,6 +168,96 @@ def weighted_progress(activity_status: pd.DataFrame) -> float:
     return float(
         (activity_status["avance_real"] * activity_status["peso"]).sum() / denominator
     )
+
+
+def build_s_curve(activities: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFrame:
+    """Construye Curva S planificada y real ponderada por actividad."""
+    if activities.empty:
+        return pd.DataFrame(columns=["fecha", "PLAN", "REAL"])
+
+    acts = activities.copy()
+    acts["peso"] = pd.to_numeric(acts.get("peso", 1), errors="coerce").fillna(1)
+    acts["inicio_plan"] = pd.to_datetime(acts.get("inicio_plan"), errors="coerce")
+    acts["fin_plan"] = pd.to_datetime(acts.get("fin_plan"), errors="coerce")
+    acts["fecha_plan"] = acts["fin_plan"].fillna(acts["inicio_plan"])
+
+    total_weight = acts["peso"].sum()
+    if total_weight <= 0:
+        total_weight = len(acts)
+        acts["peso"] = 1
+
+    valid_plan = acts.dropna(subset=["fecha_plan"]).copy()
+
+    if progress.empty or "fecha_registro" not in progress.columns:
+        real_dates = pd.Series(dtype="datetime64[ns]")
+    else:
+        real_dates = pd.to_datetime(progress["fecha_registro"], errors="coerce").dropna()
+
+    date_candidates = []
+    if not valid_plan.empty:
+        date_candidates.extend(valid_plan["fecha_plan"].tolist())
+    if not real_dates.empty:
+        date_candidates.extend(real_dates.dt.tz_localize(None).tolist())
+
+    if not date_candidates:
+        today = pd.Timestamp.today().normalize()
+        date_index = pd.date_range(today, today, freq="D")
+    else:
+        start_date = pd.Timestamp(min(date_candidates)).normalize()
+        end_date = pd.Timestamp(max(date_candidates)).normalize()
+        if end_date < start_date:
+            end_date = start_date
+        date_index = pd.date_range(start_date, end_date, freq="D")
+
+    # PLAN: peso acumulado de actividades cuya fecha plan ya ocurrió.
+    plan_values = []
+    for current_date in date_index:
+        completed_weight = valid_plan.loc[
+            valid_plan["fecha_plan"].dt.normalize() <= current_date, "peso"
+        ].sum()
+        plan_values.append(min(100.0, completed_weight / total_weight * 100))
+
+    # REAL: para cada fecha, tomar el último avance reportado de cada actividad.
+    real_values = []
+    if progress.empty:
+        real_values = [0.0] * len(date_index)
+    else:
+        prog = progress.copy()
+        prog["fecha_registro"] = pd.to_datetime(
+            prog["fecha_registro"], errors="coerce"
+        )
+        if getattr(prog["fecha_registro"].dt, "tz", None) is not None:
+            prog["fecha_registro"] = prog["fecha_registro"].dt.tz_localize(None)
+        prog["avance"] = pd.to_numeric(prog["avance"], errors="coerce").fillna(0)
+
+        weight_map = acts.set_index("id")["peso"].to_dict()
+
+        for current_date in date_index:
+            cutoff = current_date + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+            available = prog[prog["fecha_registro"] <= cutoff]
+            if available.empty:
+                real_values.append(0.0)
+                continue
+
+            latest_by_activity = (
+                available.sort_values("fecha_registro")
+                .groupby("actividad_id", as_index=False)
+                .tail(1)
+            )
+            weighted_sum = 0.0
+            for _, row in latest_by_activity.iterrows():
+                weight = float(weight_map.get(row["actividad_id"], 0))
+                weighted_sum += float(row["avance"]) * weight
+            real_values.append(min(100.0, weighted_sum / total_weight))
+
+    curve = pd.DataFrame({
+        "fecha": date_index,
+        "PLAN": plan_values,
+        "REAL": real_values,
+    })
+    curve["PLAN"] = curve["PLAN"].cummax()
+    curve["REAL"] = curve["REAL"].cummax()
+    return curve
 
 
 with st.sidebar:
@@ -378,8 +473,30 @@ if page == "Dashboard ejecutivo":
         c4.metric("Actividades culminadas", int((status["avance_real"] >= 100).sum()))
         c5.metric("Actividades pendientes", int((status["avance_real"] < 100).sum()))
 
+        # CURVA S GENERAL
+        curve = build_s_curve(activities, progress)
+        fig_curve = go.Figure()
+        fig_curve.add_trace(go.Scatter(
+            x=curve["fecha"], y=curve["PLAN"],
+            mode="lines+markers", name="PLAN"
+        ))
+        fig_curve.add_trace(go.Scatter(
+            x=curve["fecha"], y=curve["REAL"],
+            mode="lines+markers", name="REAL"
+        ))
+        fig_curve.update_layout(
+            title="Curva S – Avance general acumulado",
+            xaxis_title="Fecha",
+            yaxis_title="Avance (%)",
+            yaxis_range=[0, 105],
+            legend_orientation="h",
+            height=430,
+        )
+        st.plotly_chart(fig_curve, use_container_width=True)
+
         left, right = st.columns([1.25, 1])
         with left:
+            ot_summary["ot"] = ot_summary["ot"].astype(str)
             fig = px.bar(
                 ot_summary.sort_values("avance_ot"),
                 x="avance_ot",
@@ -387,8 +504,10 @@ if page == "Dashboard ejecutivo":
                 orientation="h",
                 text="avance_ot",
                 title="Avance ponderado por OT",
+                category_orders={"ot": ot_summary.sort_values("avance_ot")["ot"].tolist()},
             )
             fig.update_traces(texttemplate="%{text:.0f}%")
+            fig.update_yaxes(type="category")
             fig.update_layout(xaxis_range=[0, 105], height=max(430, 32 * len(ot_summary)))
             st.plotly_chart(fig, use_container_width=True)
 
@@ -476,6 +595,7 @@ if page == "Detalle por OT":
                 },
             )
 
+            details["codigo_actividad"] = details["codigo_actividad"].astype(str)
             fig = px.bar(
                 details,
                 x="codigo_actividad",
