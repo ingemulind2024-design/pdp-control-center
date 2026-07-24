@@ -1133,7 +1133,7 @@ if page == "Importar base":
                         return default
                     return float(value)
 
-                supabase.table("actividades").insert({
+                activity_payload = {
                     "ot_id": int(ot_map[ot_text]),
                     "codigo_actividad": clean_text(row["codigo_actividad"]),
                     "descripcion": clean_text(row["descripcion"]),
@@ -1143,10 +1143,21 @@ if page == "Importar base":
                     "peso": clean_number(row.get("peso"), 1),
                     "inicio_plan": clean_date(row.get("inicio_plan")),
                     "fin_plan": clean_date(row.get("fin_plan")),
-                }).execute()
+                }
+
+                # Inserta una actividad nueva o actualiza la existente cuando
+                # ya existe la combinación OT + código de actividad.
+                supabase.table("actividades").upsert(
+                    activity_payload,
+                    on_conflict="ot_id,codigo_actividad",
+                ).execute()
 
             invalidate()
-            st.success("Importación finalizada.")
+            st.success(
+                "Importación finalizada correctamente. "
+                "Las OTs nuevas fueron creadas y las actividades duplicadas "
+                "fueron actualizadas sin generar errores."
+            )
         except Exception as exc:
             st.error(f"No fue posible importar el archivo: {exc}")
 
