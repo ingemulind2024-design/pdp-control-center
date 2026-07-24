@@ -86,6 +86,23 @@ def get_supabase() -> Client:
 supabase = get_supabase()
 
 
+@st.cache_resource
+def get_supabase_admin() -> Client:
+    """
+    Cliente administrativo usado únicamente para reiniciar e importar una PDP.
+    La Secret Key se almacena en Streamlit Secrets y nunca en GitHub.
+    """
+    try:
+        admin_url = st.secrets["supabase"]["url"]
+        admin_key = st.secrets["supabase_admin"]["key"]
+        return create_client(admin_url, admin_key)
+    except Exception:
+        return None
+
+
+supabase_admin = get_supabase_admin()
+
+
 @st.cache_data(ttl=20)
 def read_table(name: str) -> pd.DataFrame:
     result = supabase.table(name).select("*").execute()
@@ -1066,10 +1083,17 @@ if page == "Administrar OTs":
 
 
 if page == "Importar base":
-    st.subheader("Importar OTs y actividades desde Excel")
+    st.subheader("Reiniciar PDP e importar OTs y actividades")
+
+    st.warning(
+        "Esta importación reemplaza completamente la base actual. "
+        "Se eliminarán las OTs, actividades, avances, observaciones e historial "
+        "existentes antes de cargar el Excel."
+    )
+
     st.write(
-        "El Excel debe contener dos hojas: `OTs` y `Actividades`. "
-        "Descargue la plantilla para respetar los nombres de columnas."
+        "El Excel debe contener exactamente dos hojas: `OTs` y `Actividades`. "
+        "La información importada será la nueva base oficial de reportabilidad."
     )
 
     template = io.BytesIO()
@@ -1090,33 +1114,70 @@ if page == "Importar base":
     )
 
     uploaded = st.file_uploader("Seleccione el Excel", type=["xlsx"])
-    if uploaded and st.button("Importar información", type="primary"):
+
+    confirm_reset = st.checkbox(
+        "Confirmo que deseo eliminar la reportabilidad actual y reemplazarla por este Excel."
+    )
+    confirmation_text = st.text_input(
+        'Para confirmar, escriba exactamente: REINICIAR'
+    )
+
+    if uploaded:
         try:
-            import_ots = pd.read_excel(uploaded, sheet_name="OTs")
-            import_activities = pd.read_excel(uploaded, sheet_name="Actividades")
+            preview_ots = pd.read_excel(uploaded, sheet_name="OTs")
+            preview_activities = pd.read_excel(uploaded, sheet_name="Actividades")
 
-            for _, row in import_ots.iterrows():
-                existing = (
-                    supabase.table("ots")
-                    .select("id")
-                    .eq("ot", str(row["ot"]).strip())
-                    .execute()
+            required_ots = {"ot", "equipo", "descripcion", "activo"}
+            required_activities = {
+                "ot", "codigo_actividad", "descripcion", "supervisor",
+                "especialidad", "grupo", "peso", "inicio_plan", "fin_plan"
+            }
+
+            missing_ots = required_ots - set(preview_ots.columns)
+            missing_activities = required_activities - set(preview_activities.columns)
+
+            if missing_ots or missing_activities:
+                details = []
+                if missing_ots:
+                    details.append(
+                        "Faltan columnas en OTs: " + ", ".join(sorted(missing_ots))
+                    )
+                if missing_activities:
+                    details.append(
+                        "Faltan columnas en Actividades: "
+                        + ", ".join(sorted(missing_activities))
+                    )
+                st.error(" | ".join(details))
+            else:
+                st.info(
+                    f"Archivo validado: {len(preview_ots)} OTs y "
+                    f"{len(preview_activities)} actividades."
                 )
-                if not existing.data:
-                    supabase.table("ots").insert({
-                        "ot": str(row["ot"]).strip(),
-                        "equipo": str(row.get("equipo", "") or ""),
-                        "descripcion": str(row.get("descripcion", "") or ""),
-                        "activo": bool(row.get("activo", True)),
-                    }).execute()
+        except Exception as preview_error:
+            st.error(f"No fue posible validar el Excel: {preview_error}")
 
-            refreshed_ots = pd.DataFrame(supabase.table("ots").select("*").execute().data)
-            ot_map = dict(zip(refreshed_ots["ot"].astype(str), refreshed_ots["id"]))
+    execute_reset = st.button(
+        "Reiniciar e importar información",
+        type="primary",
+        use_container_width=True,
+        disabled=not (
+            uploaded is not None
+            and confirm_reset
+            and confirmation_text.strip().upper() == "REINICIAR"
+        ),
+    )
 
-            for _, row in import_activities.iterrows():
-                ot_text = str(row["ot"]).strip()
-                if ot_text not in ot_map:
-                    continue
+    if execute_reset:
+        if supabase_admin is None:
+            st.error(
+                "Falta configurar la Secret Key administrativa en Streamlit Secrets. "
+                "Agregue la sección [supabase_admin] antes de reiniciar la base."
+            )
+        else:
+            try:
+                import_ots = pd.read_excel(uploaded, sheet_name="OTs")
+                import_activities = pd.read_excel(uploaded, sheet_name="Actividades")
+
                 def clean_text(value):
                     return "" if pd.isna(value) else str(value).strip()
 
@@ -1133,33 +1194,120 @@ if page == "Importar base":
                         return default
                     return float(value)
 
-                activity_payload = {
-                    "ot_id": int(ot_map[ot_text]),
-                    "codigo_actividad": clean_text(row["codigo_actividad"]),
-                    "descripcion": clean_text(row["descripcion"]),
-                    "supervisor": clean_text(row.get("supervisor")),
-                    "especialidad": clean_text(row.get("especialidad")),
-                    "grupo": clean_text(row.get("grupo")),
-                    "peso": clean_number(row.get("peso"), 1),
-                    "inicio_plan": clean_date(row.get("inicio_plan")),
-                    "fin_plan": clean_date(row.get("fin_plan")),
-                }
+                def clean_boolean(value, default=True):
+                    if pd.isna(value) or value in ("", None):
+                        return default
+                    if isinstance(value, bool):
+                        return value
+                    return str(value).strip().lower() not in {
+                        "false", "falso", "0", "no"
+                    }
 
-                # Inserta una actividad nueva o actualiza la existente cuando
-                # ya existe la combinación OT + código de actividad.
-                supabase.table("actividades").upsert(
-                    activity_payload,
-                    on_conflict="ot_id,codigo_actividad",
-                ).execute()
+                # Validar y limpiar antes de borrar la base.
+                clean_ots = []
+                for _, row in import_ots.iterrows():
+                    ot_text = clean_text(row.get("ot"))
+                    description = clean_text(row.get("descripcion"))
+                    if not ot_text or not description:
+                        continue
+                    clean_ots.append({
+                        "ot": ot_text,
+                        "equipo": clean_text(row.get("equipo")),
+                        "descripcion": description,
+                        "activo": clean_boolean(row.get("activo"), True),
+                    })
 
-            invalidate()
-            st.success(
-                "Importación finalizada correctamente. "
-                "Las OTs nuevas fueron creadas y las actividades duplicadas "
-                "fueron actualizadas sin generar errores."
-            )
-        except Exception as exc:
-            st.error(f"No fue posible importar el archivo: {exc}")
+                clean_activities = []
+                valid_ot_numbers = {row["ot"] for row in clean_ots}
+                for _, row in import_activities.iterrows():
+                    ot_text = clean_text(row.get("ot"))
+                    activity_code = clean_text(row.get("codigo_actividad"))
+                    activity_description = clean_text(row.get("descripcion"))
+
+                    if (
+                        not ot_text
+                        or ot_text not in valid_ot_numbers
+                        or not activity_code
+                        or not activity_description
+                    ):
+                        continue
+
+                    clean_activities.append({
+                        "ot": ot_text,
+                        "codigo_actividad": activity_code,
+                        "descripcion": activity_description,
+                        "supervisor": clean_text(row.get("supervisor")),
+                        "especialidad": clean_text(row.get("especialidad")),
+                        "grupo": clean_text(row.get("grupo")),
+                        "peso": clean_number(row.get("peso"), 1),
+                        "inicio_plan": clean_date(row.get("inicio_plan")),
+                        "fin_plan": clean_date(row.get("fin_plan")),
+                    })
+
+                if not clean_ots:
+                    raise ValueError("El Excel no contiene OTs válidas.")
+                if not clean_activities:
+                    raise ValueError("El Excel no contiene actividades válidas.")
+
+                progress_bar = st.progress(0, text="Validación completada.")
+
+                # Reinicio total. Al eliminar OTs, PostgreSQL elimina en cascada
+                # actividades y avances asociados.
+                progress_bar.progress(15, text="Eliminando la reportabilidad anterior...")
+                supabase_admin.table("ots").delete().neq("id", 0).execute()
+
+                progress_bar.progress(35, text="Cargando nuevas OTs...")
+                # Insertar en lotes para mayor estabilidad.
+                batch_size = 200
+                for start_index in range(0, len(clean_ots), batch_size):
+                    supabase_admin.table("ots").insert(
+                        clean_ots[start_index:start_index + batch_size]
+                    ).execute()
+
+                refreshed_ots = pd.DataFrame(
+                    supabase_admin.table("ots").select("id,ot").execute().data
+                )
+                ot_map = dict(
+                    zip(refreshed_ots["ot"].astype(str), refreshed_ots["id"])
+                )
+
+                activity_payloads = []
+                for row in clean_activities:
+                    activity_payloads.append({
+                        "ot_id": int(ot_map[row["ot"]]),
+                        "codigo_actividad": row["codigo_actividad"],
+                        "descripcion": row["descripcion"],
+                        "supervisor": row["supervisor"],
+                        "especialidad": row["especialidad"],
+                        "grupo": row["grupo"],
+                        "peso": row["peso"],
+                        "inicio_plan": row["inicio_plan"],
+                        "fin_plan": row["fin_plan"],
+                    })
+
+                progress_bar.progress(60, text="Cargando nuevas actividades...")
+                for start_index in range(0, len(activity_payloads), batch_size):
+                    supabase_admin.table("actividades").insert(
+                        activity_payloads[start_index:start_index + batch_size]
+                    ).execute()
+
+                progress_bar.progress(90, text="Actualizando el dashboard...")
+                invalidate()
+                st.cache_data.clear()
+
+                progress_bar.progress(100, text="Nueva base cargada correctamente.")
+                st.success(
+                    f"Reinicio completado. La nueva base contiene "
+                    f"{len(clean_ots)} OTs y {len(activity_payloads)} actividades. "
+                    "Todos los avances comienzan en 0%."
+                )
+                st.balloons()
+
+            except Exception as exc:
+                st.error(
+                    "No fue posible reiniciar e importar la base. "
+                    f"No continúe registrando avances hasta corregirlo: {exc}"
+                )
 
 
 if page == "Exportar reporte":
