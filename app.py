@@ -3,10 +3,10 @@ import io
 import hmac
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from supabase import Client, create_client
 
@@ -18,24 +18,17 @@ st.set_page_config(
 )
 
 BUCKET = "evidencias-ots"
-MASTER_FILE = Path(__file__).with_name("maestro_ots_quellaveco.csv")
 
 st.markdown("""
 <style>
 [data-testid="stSidebar"] {background:#082d55;}
 [data-testid="stSidebar"] * {color:white;}
 [data-testid="stMetric"] {
-    background:#ffffff;border:1px solid #e5e7eb;padding:14px;
+    background:#fff;border:1px solid #e5e7eb;padding:14px;
     border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.05);
 }
-.block-container {padding-top:1.1rem;}
+.block-container {padding-top:1.15rem;}
 h1,h2,h3 {color:#082d55;}
-.ot-card {
-    background:#f8fafc;border:1px solid #dbe3ec;border-radius:12px;
-    padding:16px;margin:8px 0 18px 0;
-}
-.label {font-size:12px;color:#667085;font-weight:700;text-transform:uppercase;}
-.value {font-size:15px;color:#101828;margin-bottom:12px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -43,6 +36,7 @@ h1,h2,h3 {color:#082d55;}
 def authenticate() -> bool:
     if st.session_state.get("authenticated"):
         return True
+
     user_ok = st.secrets.get("auth", {}).get("username", "Jose")
     pass_ok = st.secrets.get("auth", {}).get("password", "Mainin2026")
 
@@ -52,7 +46,7 @@ def authenticate() -> bool:
     box-shadow:0 10px 35px rgba(0,0,0,.10);text-align:center;">
       <div style="font-size:34px;font-weight:800;color:#082d55;">PDP CONTROL CENTER</div>
       <div style="font-size:18px;color:#667085;margin-top:8px;">
-        Control y seguimiento de órdenes de trabajo
+        Gestión de OTs, actividades y avances
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -89,25 +83,21 @@ def get_supabase() -> Client:
         st.stop()
 
 
-@st.cache_data
-def load_master() -> pd.DataFrame:
-    if not MASTER_FILE.exists():
-        st.error("No se encontró maestro_ots_quellaveco.csv en el repositorio.")
-        st.stop()
-    df = pd.read_csv(MASTER_FILE, dtype={"OT": str})
-    df["OT"] = df["OT"].astype(str).str.strip()
-    return df
-
-
 supabase = get_supabase()
-master = load_master()
 
 
-def upload_evidence(file, ot: str) -> str:
+@st.cache_data(ttl=20)
+def read_table(name: str) -> pd.DataFrame:
+    result = supabase.table(name).select("*").execute()
+    rows = result.data or []
+    return pd.DataFrame(rows)
+
+
+def upload_evidence(file, ot: str, activity_id: str) -> str:
     ext = file.name.rsplit(".", 1)[-1].lower() if "." in file.name else "jpg"
     safe_ot = "".join(ch for ch in ot if ch.isalnum() or ch in "-_")
     filename = f"{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:10]}.{ext}"
-    path = f"{safe_ot}/{filename}"
+    path = f"{safe_ot}/{activity_id}/{filename}"
     supabase.storage.from_(BUCKET).upload(
         path=path,
         file=file.getvalue(),
@@ -116,29 +106,63 @@ def upload_evidence(file, ot: str) -> str:
     return supabase.storage.from_(BUCKET).get_public_url(path)
 
 
-def save_record(record: dict) -> None:
-    supabase.table("ot_avances").insert(record).execute()
+def invalidate():
+    read_table.clear()
 
 
-@st.cache_data(ttl=20)
-def load_records() -> pd.DataFrame:
-    result = (
-        supabase.table("ot_avances")
-        .select("*")
-        .order("fecha_registro", desc=True)
-        .execute()
-    )
-    rows = result.data or []
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    if "avance" in df.columns:
-        df["avance"] = pd.to_numeric(df["avance"], errors="coerce").fillna(0)
-    if "fecha_registro" in df.columns:
-        df["fecha_registro"] = pd.to_datetime(
-            df["fecha_registro"], errors="coerce", utc=True
+def load_model():
+    ots = read_table("ots")
+    activities = read_table("actividades")
+    progress = read_table("avances_actividad")
+
+    if not progress.empty and "fecha_registro" in progress.columns:
+        progress["fecha_registro"] = pd.to_datetime(
+            progress["fecha_registro"], errors="coerce", utc=True
         ).dt.tz_convert("America/Lima")
-    return df
+
+    return ots, activities, progress
+
+
+def latest_progress(progress: pd.DataFrame) -> pd.DataFrame:
+    if progress.empty:
+        return pd.DataFrame(columns=["actividad_id", "avance"])
+    return (
+        progress.sort_values("fecha_registro")
+        .groupby("actividad_id", as_index=False)
+        .tail(1)
+    )
+
+
+def build_activity_status(activities: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFrame:
+    if activities.empty:
+        return activities.copy()
+
+    latest = latest_progress(progress)
+    if latest.empty:
+        result = activities.copy()
+        result["avance_real"] = 0.0
+    else:
+        result = activities.merge(
+            latest[["actividad_id", "avance", "descripcion_avance", "observaciones", "fecha_registro"]],
+            left_on="id",
+            right_on="actividad_id",
+            how="left",
+        )
+        result["avance_real"] = pd.to_numeric(result["avance"], errors="coerce").fillna(0)
+
+    result["peso"] = pd.to_numeric(result.get("peso", 1), errors="coerce").fillna(1)
+    return result
+
+
+def weighted_progress(activity_status: pd.DataFrame) -> float:
+    if activity_status.empty:
+        return 0.0
+    denominator = activity_status["peso"].sum()
+    if denominator <= 0:
+        return float(activity_status["avance_real"].mean())
+    return float(
+        (activity_status["avance_real"] * activity_status["peso"]).sum() / denominator
+    )
 
 
 with st.sidebar:
@@ -147,8 +171,14 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Menú",
-        ["Dashboard ejecutivo", "Registrar avance", "Historial por OT",
-         "Galería de evidencias", "Exportar reporte"],
+        [
+            "Dashboard ejecutivo",
+            "Registrar avance",
+            "Detalle por OT",
+            "Administrar OTs",
+            "Importar base",
+            "Exportar reporte",
+        ],
     )
     st.markdown("---")
     st.write(f"Usuario: **{st.session_state.get('username', 'Jose')}**")
@@ -158,274 +188,481 @@ with st.sidebar:
 
 
 st.title("APLICATIVO DE CONTROL Y SEGUIMIENTO DE OTs")
-st.caption("La información técnica se completa automáticamente al seleccionar la OT.")
+st.caption("Cada OT puede contener varias actividades, cada una con avance independiente.")
+
+ots, activities, progress = load_model()
+activity_status = build_activity_status(activities, progress)
 
 
 if page == "Registrar avance":
-    st.subheader("Registrar avance")
-
-    selected_ot = st.selectbox(
-        "Escriba o seleccione el número de OT *",
-        options=master["OT"].sort_values().tolist(),
-        index=None,
-        placeholder="Escriba el número de OT para buscar...",
-    )
-
-    if selected_ot:
-        info = master.loc[master["OT"] == selected_ot].iloc[0]
-
-        c1, c2, c3 = st.columns(3)
-        c1.text_input("Equipo", value=str(info.get("EQUIPO", "")), disabled=True)
-        c2.text_input("Grupo", value=str(info.get("GRUPO", "")), disabled=True)
-        c3.text_input("Supervisor", value=str(info.get("SUPERVISOR", "")), disabled=True)
-
-        c1, c2 = st.columns(2)
-        c1.text_input(
-            "Ubicación / descripción del equipo",
-            value=str(info.get("UBICACION_EQUIPO", "")),
-            disabled=True,
-        )
-        c2.text_input(
-            "Especialidad",
-            value=str(info.get("ESPECIALIDAD", "")),
-            disabled=True,
-        )
-
-        st.text_area(
-            "Descripción de la orden de trabajo",
-            value=str(info.get("DESCRIPCION_OT", "")),
-            disabled=True,
-            height=90,
-        )
-        st.text_area(
-            "Operaciones programadas",
-            value=str(info.get("DESCRIPCION_OPERACIONES", "")),
-            disabled=True,
-            height=100,
-        )
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.text_input("Inicio planificado", value=str(info.get("INICIO", "")), disabled=True)
-        c2.text_input("Fin planificado", value=str(info.get("FIN", "")), disabled=True)
-        c3.text_input(
-            "Cantidad de personas",
-            value=str(int(float(info.get("CANT_PERSONAS_MAX", 0) or 0))),
-            disabled=True,
-        )
-        c4.text_input(
-            "HH planificadas",
-            value=f"{float(info.get('HH_TOTAL', 0) or 0):.0f}",
-            disabled=True,
-        )
-
-        st.markdown("---")
-
-        with st.form("registro_avance", clear_on_submit=True):
-            avance = st.number_input(
-                "Porcentaje de avance (%) *",
-                min_value=0,
-                max_value=100,
-                value=0,
-                step=5,
-            )
-            descripcion = st.text_area(
-                "Descripción breve de la actividad realizada *",
-                placeholder="Ejemplo: Se ejecutó la inspección, conexionado y pruebas preliminares.",
-                height=110,
-            )
-            observaciones = st.text_area(
-                "Observaciones de la OT",
-                placeholder="Registre restricciones, pendientes, desviaciones o coordinaciones.",
-                height=100,
-            )
-            evidencias = st.file_uploader(
-                "Evidencias fotográficas",
-                type=["jpg", "jpeg", "png", "webp"],
-                accept_multiple_files=True,
-                help="Puede adjuntar hasta 10 fotografías.",
-            )
-            save = st.form_submit_button(
-                "Guardar avance",
-                type="primary",
-                use_container_width=True,
-            )
-
-        if save:
-            if not descripcion.strip():
-                st.error("Debe ingresar una descripción breve de la actividad realizada.")
-            elif len(evidencias or []) > 10:
-                st.error("Puede adjuntar como máximo 10 fotografías.")
-            else:
-                try:
-                    urls = [upload_evidence(photo, selected_ot) for photo in evidencias or []]
-                    estado = (
-                        "CULMINADO" if avance >= 100
-                        else ("NO INICIADO" if avance <= 0 else "EN EJECUCIÓN")
-                    )
-                    save_record({
-                        "ot": selected_ot,
-                        "equipo": str(info.get("EQUIPO", "")),
-                        "ubicacion_equipo": str(info.get("UBICACION_EQUIPO", "")),
-                        "supervisor": str(info.get("SUPERVISOR", "")),
-                        "especialidad": str(info.get("ESPECIALIDAD", "")),
-                        "grupo": str(info.get("GRUPO", "")),
-                        "descripcion_ot": str(info.get("DESCRIPCION_OT", "")),
-                        "descripcion_operaciones": str(info.get("DESCRIPCION_OPERACIONES", "")),
-                        "inicio_plan": str(info.get("INICIO", "")),
-                        "fin_plan": str(info.get("FIN", "")),
-                        "hh_plan": float(info.get("HH_TOTAL", 0) or 0),
-                        "cant_personas": int(float(info.get("CANT_PERSONAS_MAX", 0) or 0)),
-                        "avance": int(avance),
-                        "estado": estado,
-                        "descripcion": descripcion.strip(),
-                        "observaciones": observaciones.strip(),
-                        "evidencias": urls,
-                        "usuario": st.session_state.get("username", "Jose"),
-                        "fecha_registro": datetime.now(timezone.utc).isoformat(),
-                    })
-                    load_records.clear()
-                    st.success(f"El avance de la OT {selected_ot} fue registrado correctamente.")
-                except Exception as exc:
-                    st.error(f"No fue posible guardar el registro: {exc}")
+    if ots.empty or activities.empty:
+        st.warning("Primero debe registrar o importar OTs y actividades.")
     else:
-        st.info("Seleccione una OT para visualizar automáticamente toda su información.")
+        active_ots = ots.copy()
+        if "activo" in active_ots.columns:
+            active_ots = active_ots[active_ots["activo"].fillna(True)]
 
+        ot_options = active_ots["ot"].astype(str).sort_values().tolist()
+        selected_ot = st.selectbox(
+            "Escriba o seleccione la OT *",
+            ot_options,
+            index=None,
+            placeholder="Buscar OT...",
+        )
 
-records = load_records()
+        if selected_ot:
+            ot_info = active_ots[active_ots["ot"].astype(str) == selected_ot].iloc[0]
+            ot_activities = activities[activities["ot_id"] == ot_info["id"]].copy()
+
+            if ot_activities.empty:
+                st.warning("La OT seleccionada no tiene actividades registradas.")
+            else:
+                st.text_input("Equipo", value=str(ot_info.get("equipo", "")), disabled=True)
+                st.text_area(
+                    "Descripción de la OT",
+                    value=str(ot_info.get("descripcion", "")),
+                    disabled=True,
+                    height=80,
+                )
+
+                ot_activities["selector"] = (
+                    ot_activities["codigo_actividad"].astype(str)
+                    + " — "
+                    + ot_activities["descripcion"].astype(str)
+                )
+                selected_activity_label = st.selectbox(
+                    "Seleccione la actividad *",
+                    ot_activities["selector"].tolist(),
+                    index=None,
+                    placeholder="Buscar actividad...",
+                )
+
+                if selected_activity_label:
+                    activity = ot_activities[
+                        ot_activities["selector"] == selected_activity_label
+                    ].iloc[0]
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.text_input(
+                        "Código de actividad",
+                        value=str(activity.get("codigo_actividad", "")),
+                        disabled=True,
+                    )
+                    c2.text_input(
+                        "Supervisor",
+                        value=str(activity.get("supervisor", "")),
+                        disabled=True,
+                    )
+                    c3.text_input(
+                        "Especialidad",
+                        value=str(activity.get("especialidad", "")),
+                        disabled=True,
+                    )
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.text_input(
+                        "Grupo",
+                        value=str(activity.get("grupo", "")),
+                        disabled=True,
+                    )
+                    c2.text_input(
+                        "Inicio planificado",
+                        value=str(activity.get("inicio_plan", "")),
+                        disabled=True,
+                    )
+                    c3.text_input(
+                        "Fin planificado",
+                        value=str(activity.get("fin_plan", "")),
+                        disabled=True,
+                    )
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.text_input("Sección", value=str(activity.get("seccion", "")), disabled=True)
+                    c2.text_input("Personal", value=str(activity.get("personal", "")), disabled=True)
+                    c3.text_input("Duración (h)", value=str(activity.get("duracion_h", "")), disabled=True)
+                    c4.text_input("HH planificadas", value=str(activity.get("hh_plan", "")), disabled=True)
+
+                    st.text_area(
+                        "Descripción de actividad",
+                        value=str(activity.get("descripcion", "")),
+                        disabled=True,
+                        height=90,
+                    )
+
+                    current = activity_status[
+                        activity_status["id"] == activity["id"]
+                    ]
+                    current_value = (
+                        int(current.iloc[0]["avance_real"])
+                        if not current.empty else 0
+                    )
+
+                    with st.form("avance_form", clear_on_submit=True):
+                        avance = st.number_input(
+                            "Porcentaje de avance de la actividad (%) *",
+                            min_value=0,
+                            max_value=100,
+                            value=current_value,
+                            step=5,
+                        )
+                        description = st.text_area(
+                            "Descripción breve del avance realizado *",
+                            height=110,
+                        )
+                        observations = st.text_area(
+                            "Observaciones",
+                            height=100,
+                        )
+                        photos = st.file_uploader(
+                            "Evidencias fotográficas",
+                            type=["jpg", "jpeg", "png", "webp"],
+                            accept_multiple_files=True,
+                        )
+                        save = st.form_submit_button(
+                            "Guardar avance",
+                            type="primary",
+                            use_container_width=True,
+                        )
+
+                    if save:
+                        if not description.strip():
+                            st.error("Debe ingresar una descripción del avance.")
+                        elif len(photos or []) > 10:
+                            st.error("Puede adjuntar como máximo 10 fotografías.")
+                        else:
+                            try:
+                                urls = [
+                                    upload_evidence(photo, selected_ot, str(activity["id"]))
+                                    for photo in photos or []
+                                ]
+                                supabase.table("avances_actividad").insert({
+                                    "actividad_id": int(activity["id"]),
+                                    "avance": int(avance),
+                                    "descripcion_avance": description.strip(),
+                                    "observaciones": observations.strip(),
+                                    "evidencias": urls,
+                                    "usuario": st.session_state.get("username", "Jose"),
+                                    "fecha_registro": datetime.now(timezone.utc).isoformat(),
+                                }).execute()
+                                invalidate()
+                                st.success(
+                                    f"Avance registrado: OT {selected_ot}, "
+                                    f"actividad {activity['codigo_actividad']}."
+                                )
+                            except Exception as exc:
+                                st.error(f"No fue posible guardar el avance: {exc}")
 
 
 if page == "Dashboard ejecutivo":
-    if records.empty:
-        st.info("Todavía no existen avances registrados.")
+    if ots.empty or activities.empty:
+        st.info("Todavía no existen OTs y actividades registradas.")
     else:
-        latest = (
-            records.sort_values("fecha_registro")
-            .groupby("ot", as_index=False)
-            .tail(1)
-            .copy()
+        status = activity_status.copy()
+        ot_summary = (
+            status.groupby("ot_id")
+            .apply(weighted_progress)
+            .reset_index(name="avance_ot")
         )
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("OTs registradas", latest["ot"].nunique())
-        c2.metric("Avance promedio", f"{latest['avance'].mean():.0f}%")
-        c3.metric("Culminadas", int((latest["avance"] >= 100).sum()))
-        c4.metric("En ejecución", int(((latest["avance"] > 0) & (latest["avance"] < 100)).sum()))
-        c5.metric("No iniciadas", int((latest["avance"] <= 0).sum()))
+        ot_summary = ot_summary.merge(
+            ots[["id", "ot", "equipo", "descripcion"]],
+            left_on="ot_id",
+            right_on="id",
+            how="left",
+        )
 
-        left, right = st.columns([1.3, 1])
+        general = weighted_progress(status)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("OTs", ots["id"].nunique())
+        c2.metric("Actividades", activities["id"].nunique())
+        c3.metric("Avance general", f"{general:.0f}%")
+        c4.metric("Actividades culminadas", int((status["avance_real"] >= 100).sum()))
+        c5.metric("Actividades pendientes", int((status["avance_real"] < 100).sum()))
+
+        left, right = st.columns([1.25, 1])
         with left:
             fig = px.bar(
-                latest.sort_values("avance"),
-                x="avance", y="ot", orientation="h", text="avance",
-                color="especialidad", title="Último avance registrado por OT",
+                ot_summary.sort_values("avance_ot"),
+                x="avance_ot",
+                y="ot",
+                orientation="h",
+                text="avance_ot",
+                title="Avance ponderado por OT",
             )
-            fig.update_traces(texttemplate="%{text}%")
-            fig.update_layout(xaxis_range=[0,105], height=max(420, 34*len(latest)))
+            fig.update_traces(texttemplate="%{text:.0f}%")
+            fig.update_layout(xaxis_range=[0, 105], height=max(430, 32 * len(ot_summary)))
             st.plotly_chart(fig, use_container_width=True)
+
         with right:
-            status = latest.groupby("estado").size().reset_index(name="OTs")
-            fig2 = px.bar(status, x="estado", y="OTs", text_auto=True,
-                          title="Estado de las OTs")
-            fig2.update_layout(height=420, showlegend=False)
+            status["estado_kpi"] = status["avance_real"].apply(
+                lambda x: "CULMINADA" if x >= 100 else ("NO INICIADA" if x <= 0 else "EN EJECUCIÓN")
+            )
+            states = status.groupby("estado_kpi").size().reset_index(name="Actividades")
+            fig2 = px.bar(
+                states,
+                x="estado_kpi",
+                y="Actividades",
+                text_auto=True,
+                title="Estado de actividades",
+            )
+            fig2.update_layout(height=430, showlegend=False)
             st.plotly_chart(fig2, use_container_width=True)
 
-        st.subheader("Últimas actualizaciones")
-        cols = [c for c in [
-            "fecha_registro","ot","equipo","supervisor","grupo",
-            "avance","estado","descripcion","observaciones","usuario"
-        ] if c in records.columns]
-        st.dataframe(
-            records[cols].sort_values("fecha_registro", ascending=False),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "fecha_registro": st.column_config.DatetimeColumn(
-                    "Fecha y hora", format="DD/MM/YYYY HH:mm"
-                ),
-                "avance": st.column_config.ProgressColumn(
-                    "Avance", min_value=0, max_value=100, format="%d%%"
-                ),
-            },
-        )
+        c1, c2 = st.columns(2)
+        with c1:
+            specialty = (
+                status.groupby("especialidad", as_index=False)
+                .apply(lambda x: pd.Series({"avance": weighted_progress(x)}))
+            )
+            fig3 = px.bar(
+                specialty,
+                x="especialidad",
+                y="avance",
+                text_auto=".0f",
+                title="Avance por especialidad",
+            )
+            fig3.update_layout(yaxis_range=[0,105], height=380)
+            st.plotly_chart(fig3, use_container_width=True)
+
+        with c2:
+            supervisors = status[status["supervisor"].fillna("").str.strip() != ""]
+            supervisors = (
+                supervisors.groupby("supervisor", as_index=False)
+                .apply(lambda x: pd.Series({"avance": weighted_progress(x)}))
+                .sort_values("avance")
+            )
+            fig4 = px.bar(
+                supervisors,
+                x="avance",
+                y="supervisor",
+                orientation="h",
+                text_auto=".0f",
+                title="Avance por supervisor",
+            )
+            fig4.update_layout(xaxis_range=[0,105], height=380)
+            st.plotly_chart(fig4, use_container_width=True)
 
 
-if page == "Historial por OT":
-    if records.empty:
-        st.info("Todavía no existen avances registrados.")
+if page == "Detalle por OT":
+    if ots.empty:
+        st.info("No existen OTs.")
     else:
         selected = st.selectbox(
-            "Seleccione una OT",
-            sorted(records["ot"].dropna().astype(str).unique().tolist()),
+            "Seleccione OT",
+            ots["ot"].astype(str).sort_values().tolist(),
         )
-        history = records[records["ot"].astype(str) == selected].sort_values("fecha_registro")
-        fig = px.line(history, x="fecha_registro", y="avance",
-                      markers=True, text="avance", title=f"Evolución OT {selected}")
-        fig.update_traces(texttemplate="%{text}%", textposition="top center")
-        fig.update_layout(yaxis_range=[0,105], height=420)
-        st.plotly_chart(fig, use_container_width=True)
+        ot_row = ots[ots["ot"].astype(str) == selected].iloc[0]
+        details = activity_status[activity_status["ot_id"] == ot_row["id"]].copy()
 
-        for _, row in history.sort_values("fecha_registro", ascending=False).iterrows():
-            st.markdown("---")
-            date_text = row["fecha_registro"].strftime("%d/%m/%Y %H:%M")
-            st.markdown(f"### {date_text} — {int(row['avance'])}%")
-            st.write(f"**Actividad ejecutada:** {row.get('descripcion','')}")
-            st.write(f"**Observaciones:** {row.get('observaciones','') or 'Sin observaciones'}")
-            st.caption(f"Registrado por: {row.get('usuario','')}")
-            urls = row.get("evidencias") or []
-            if isinstance(urls, str):
-                urls = [urls]
-            if urls:
-                image_cols = st.columns(min(3, len(urls)))
-                for i, url in enumerate(urls):
-                    image_cols[i % len(image_cols)].image(url, use_container_width=True)
+        st.subheader(f"OT {selected}")
+        st.write(f"**Equipo:** {ot_row.get('equipo', '')}")
+        st.write(f"**Descripción:** {ot_row.get('descripcion', '')}")
 
-
-if page == "Galería de evidencias":
-    if records.empty:
-        st.info("Todavía no existen evidencias.")
-    else:
-        evidence_rows = records[
-            records["evidencias"].apply(lambda value: bool(value))
-        ]
-        if evidence_rows.empty:
-            st.info("Todavía no existen evidencias fotográficas.")
+        if details.empty:
+            st.info("La OT no tiene actividades.")
         else:
-            selected = st.selectbox(
-                "Filtrar por OT",
-                ["TODAS"] + sorted(evidence_rows["ot"].astype(str).unique().tolist()),
+            st.metric("Avance ponderado de la OT", f"{weighted_progress(details):.0f}%")
+            columns = [
+                "codigo_actividad", "descripcion", "supervisor", "especialidad",
+                "grupo", "seccion", "personal", "duracion_h", "hh_plan", "peso", "avance_real"
+            ]
+            st.dataframe(
+                details[columns],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "avance_real": st.column_config.ProgressColumn(
+                        "Avance", min_value=0, max_value=100, format="%d%%"
+                    )
+                },
             )
-            if selected != "TODAS":
-                evidence_rows = evidence_rows[
-                    evidence_rows["ot"].astype(str) == selected
-                ]
-            for _, row in evidence_rows.iterrows():
-                st.markdown(f"### OT {row['ot']} — {int(row['avance'])}%")
-                urls = row.get("evidencias") or []
-                if isinstance(urls, str):
-                    urls = [urls]
-                cols = st.columns(min(3, len(urls)))
-                for i, url in enumerate(urls):
-                    cols[i % len(cols)].image(url, use_container_width=True)
-                st.markdown("---")
+
+            fig = px.bar(
+                details,
+                x="codigo_actividad",
+                y="avance_real",
+                text_auto=".0f",
+                hover_data=["descripcion"],
+                title="Avance por actividad",
+            )
+            fig.update_layout(yaxis_range=[0,105], height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+
+if page == "Administrar OTs":
+    tab1, tab2 = st.tabs(["Nueva OT", "Nueva actividad"])
+
+    with tab1:
+        with st.form("new_ot", clear_on_submit=True):
+            ot_number = st.text_input("Número de OT *")
+            equipment = st.text_input("Equipo")
+            ot_description = st.text_area("Descripción de OT *")
+            active = st.checkbox("Activa", value=True)
+            create_ot = st.form_submit_button("Crear OT", type="primary")
+        if create_ot:
+            if not ot_number.strip() or not ot_description.strip():
+                st.error("La OT y la descripción son obligatorias.")
+            else:
+                try:
+                    supabase.table("ots").insert({
+                        "ot": ot_number.strip(),
+                        "equipo": equipment.strip(),
+                        "descripcion": ot_description.strip(),
+                        "activo": active,
+                    }).execute()
+                    invalidate()
+                    st.success("OT creada.")
+                except Exception as exc:
+                    st.error(f"No fue posible crear la OT: {exc}")
+
+    with tab2:
+        if ots.empty:
+            st.info("Primero cree una OT.")
+        else:
+            with st.form("new_activity", clear_on_submit=True):
+                selected_ot_admin = st.selectbox(
+                    "OT *",
+                    ots["ot"].astype(str).sort_values().tolist(),
+                )
+                activity_code = st.text_input("Código de actividad *")
+                activity_description = st.text_area("Descripción de actividad *")
+                c1, c2, c3 = st.columns(3)
+                supervisor = c1.text_input("Supervisor")
+                specialty = c2.text_input("Especialidad")
+                group = c3.text_input("Grupo")
+                c1, c2, c3 = st.columns(3)
+                weight = c1.number_input("Peso", min_value=0.01, value=1.0, step=0.1)
+                start_plan = c2.date_input("Inicio planificado")
+                finish_plan = c3.date_input("Fin planificado")
+                create_activity = st.form_submit_button("Crear actividad", type="primary")
+
+            if create_activity:
+                if not activity_code.strip() or not activity_description.strip():
+                    st.error("Código y descripción son obligatorios.")
+                else:
+                    try:
+                        ot_id = int(
+                            ots[ots["ot"].astype(str) == selected_ot_admin].iloc[0]["id"]
+                        )
+                        supabase.table("actividades").insert({
+                            "ot_id": ot_id,
+                            "codigo_actividad": activity_code.strip(),
+                            "descripcion": activity_description.strip(),
+                            "supervisor": supervisor.strip(),
+                            "especialidad": specialty.strip(),
+                            "grupo": group.strip(),
+                            "peso": float(weight),
+                            "inicio_plan": start_plan.isoformat(),
+                            "fin_plan": finish_plan.isoformat(),
+                        }).execute()
+                        invalidate()
+                        st.success("Actividad creada.")
+                    except Exception as exc:
+                        st.error(f"No fue posible crear la actividad: {exc}")
+
+
+if page == "Importar base":
+    st.subheader("Importar OTs y actividades desde Excel")
+    st.write(
+        "El Excel debe contener dos hojas: `OTs` y `Actividades`. "
+        "Descargue la plantilla para respetar los nombres de columnas."
+    )
+
+    template = io.BytesIO()
+    with pd.ExcelWriter(template, engine="openpyxl") as writer:
+        pd.DataFrame(columns=["ot", "equipo", "descripcion", "activo"]).to_excel(
+            writer, index=False, sheet_name="OTs"
+        )
+        pd.DataFrame(columns=[
+            "ot", "codigo_actividad", "descripcion", "supervisor",
+            "especialidad", "grupo", "peso", "inicio_plan", "fin_plan"
+        ]).to_excel(writer, index=False, sheet_name="Actividades")
+
+    st.download_button(
+        "Descargar plantilla",
+        template.getvalue(),
+        "plantilla_ots_actividades.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    uploaded = st.file_uploader("Seleccione el Excel", type=["xlsx"])
+    if uploaded and st.button("Importar información", type="primary"):
+        try:
+            import_ots = pd.read_excel(uploaded, sheet_name="OTs")
+            import_activities = pd.read_excel(uploaded, sheet_name="Actividades")
+
+            for _, row in import_ots.iterrows():
+                existing = (
+                    supabase.table("ots")
+                    .select("id")
+                    .eq("ot", str(row["ot"]).strip())
+                    .execute()
+                )
+                if not existing.data:
+                    supabase.table("ots").insert({
+                        "ot": str(row["ot"]).strip(),
+                        "equipo": str(row.get("equipo", "") or ""),
+                        "descripcion": str(row.get("descripcion", "") or ""),
+                        "activo": bool(row.get("activo", True)),
+                    }).execute()
+
+            refreshed_ots = pd.DataFrame(supabase.table("ots").select("*").execute().data)
+            ot_map = dict(zip(refreshed_ots["ot"].astype(str), refreshed_ots["id"]))
+
+            for _, row in import_activities.iterrows():
+                ot_text = str(row["ot"]).strip()
+                if ot_text not in ot_map:
+                    continue
+                supabase.table("actividades").insert({
+                    "ot_id": int(ot_map[ot_text]),
+                    "codigo_actividad": str(row["codigo_actividad"]).strip(),
+                    "descripcion": str(row["descripcion"]).strip(),
+                    "supervisor": str(row.get("supervisor", "") or ""),
+                    "especialidad": str(row.get("especialidad", "") or ""),
+                    "grupo": str(row.get("grupo", "") or ""),
+                    "peso": float(row.get("peso", 1) or 1),
+                    "inicio_plan": str(row.get("inicio_plan", "") or ""),
+                    "fin_plan": str(row.get("fin_plan", "") or ""),
+                }).execute()
+
+            invalidate()
+            st.success("Importación finalizada.")
+        except Exception as exc:
+            st.error(f"No fue posible importar el archivo: {exc}")
 
 
 if page == "Exportar reporte":
-    if records.empty:
-        st.info("No existen registros para exportar.")
+    if progress.empty:
+        st.info("No existen avances para exportar.")
     else:
-        output_df = records.copy()
-        if "evidencias" in output_df.columns:
-            output_df["evidencias"] = output_df["evidencias"].apply(
-                lambda value: "\n".join(value) if isinstance(value, list) else str(value or "")
+        export = progress.merge(
+            activities[["id", "ot_id", "codigo_actividad", "descripcion"]],
+            left_on="actividad_id",
+            right_on="id",
+            how="left",
+            suffixes=("", "_actividad"),
+        )
+        export = export.merge(
+            ots[["id", "ot", "equipo"]],
+            left_on="ot_id",
+            right_on="id",
+            how="left",
+            suffixes=("", "_ot"),
+        )
+        if "fecha_registro" in export.columns:
+            export["fecha_registro"] = export["fecha_registro"].dt.tz_localize(None)
+        if "evidencias" in export.columns:
+            export["evidencias"] = export["evidencias"].apply(
+                lambda x: "\n".join(x) if isinstance(x, list) else str(x or "")
             )
-        if "fecha_registro" in output_df.columns:
-            output_df["fecha_registro"] = output_df["fecha_registro"].dt.tz_localize(None)
+
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            output_df.to_excel(writer, index=False, sheet_name="Avances_OT")
+            export.to_excel(writer, index=False, sheet_name="Avances")
+
         st.download_button(
-            "Descargar reporte en Excel",
+            "Descargar reporte Excel",
             output.getvalue(),
-            "reporte_avances_ots.xlsx",
+            "reporte_actividades_ots.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
