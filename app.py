@@ -260,6 +260,113 @@ def build_s_curve(activities: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFr
     return curve
 
 
+def compute_kpis(activities: pd.DataFrame, progress: pd.DataFrame) -> dict:
+    status = build_activity_status(activities, progress)
+    if status.empty:
+        return {
+            "avance_general": 0.0,
+            "actividades": 0,
+            "culminadas": 0,
+            "parciales": 0,
+            "no_iniciadas": 0,
+            "spi": 0.0,
+            "hh_plan": 0.0,
+            "hh_ganadas": 0.0,
+        }
+
+    avance_general = weighted_progress(status)
+    culminadas = int((status["avance_real"] >= 100).sum())
+    parciales = int(((status["avance_real"] > 0) & (status["avance_real"] < 100)).sum())
+    no_iniciadas = int((status["avance_real"] <= 0).sum())
+
+    hh_plan_series = pd.to_numeric(status.get("hh_plan", 0), errors="coerce").fillna(0)
+    hh_plan = float(hh_plan_series.sum())
+    hh_ganadas = float((hh_plan_series * status["avance_real"] / 100).sum())
+
+    today = pd.Timestamp.today().normalize()
+    plan_dates = pd.to_datetime(status.get("fin_plan"), errors="coerce").fillna(
+        pd.to_datetime(status.get("inicio_plan"), errors="coerce")
+    )
+    plan_due = status.loc[plan_dates <= today].copy()
+    plan_due_pct = weighted_progress(
+        plan_due.assign(avance_real=100)
+    ) if not plan_due.empty else 0.0
+    spi = (avance_general / plan_due_pct) if plan_due_pct > 0 else 0.0
+
+    return {
+        "avance_general": avance_general,
+        "actividades": len(status),
+        "culminadas": culminadas,
+        "parciales": parciales,
+        "no_iniciadas": no_iniciadas,
+        "spi": spi,
+        "hh_plan": hh_plan,
+        "hh_ganadas": hh_ganadas,
+    }
+
+
+def traffic_light(value: float, green: float = 0.95, yellow: float = 0.80) -> str:
+    if value >= green:
+        return "🟢"
+    if value >= yellow:
+        return "🟡"
+    return "🔴"
+
+
+def build_daily_summary(ots: pd.DataFrame, activities: pd.DataFrame, progress: pd.DataFrame) -> str:
+    if progress.empty:
+        return "No existen avances registrados."
+
+    today = pd.Timestamp.now(tz="America/Lima").date()
+    daily = progress[
+        pd.to_datetime(progress["fecha_registro"], errors="coerce").dt.date == today
+    ].copy()
+
+    if daily.empty:
+        return "No se registraron avances durante el día."
+
+    latest = latest_progress(progress)
+    status = build_activity_status(activities, progress)
+    kpis = compute_kpis(activities, progress)
+
+    top_updates = daily.sort_values("fecha_registro", ascending=False).head(8)
+    lines = [
+        f"Resumen diario de control de OTs – {today.strftime('%d/%m/%Y')}",
+        f"Avance general acumulado: {kpis['avance_general']:.1f}%.",
+        f"Registros realizados hoy: {len(daily)}.",
+        f"Actividades culminadas: {kpis['culminadas']}.",
+        f"Actividades en ejecución: {kpis['parciales']}.",
+        f"Actividades no iniciadas: {kpis['no_iniciadas']}.",
+        "",
+        "Principales actualizaciones:"
+    ]
+
+    activity_lookup = activities.set_index("id") if not activities.empty else pd.DataFrame()
+
+    for _, row in top_updates.iterrows():
+        activity_id = row.get("actividad_id")
+        if not activity_lookup.empty and activity_id in activity_lookup.index:
+            act = activity_lookup.loc[activity_id]
+            code = act.get("codigo_actividad", "")
+            description = act.get("descripcion", "")
+        else:
+            code = ""
+            description = ""
+        lines.append(
+            f"- {code}: {row.get('avance', 0)}% – "
+            f"{row.get('descripcion_avance', '') or description}"
+        )
+
+    observations = daily["observaciones"].fillna("").astype(str)
+    observations = [x.strip() for x in observations if x.strip()]
+    if observations:
+        lines += ["", "Observaciones y restricciones reportadas:"]
+        for obs in observations[:8]:
+            lines.append(f"- {obs}")
+
+    return "\n".join(lines)
+
+
 with st.sidebar:
     st.markdown("## MAININ")
     st.caption("Maintenance Ingenuity")
@@ -270,6 +377,8 @@ with st.sidebar:
             "Dashboard ejecutivo",
             "Registrar avance",
             "Detalle por OT",
+            "Evidencias",
+            "Informe diario",
             "Administrar OTs",
             "Importar base",
             "Exportar reporte",
@@ -465,13 +574,25 @@ if page == "Dashboard ejecutivo":
             how="left",
         )
 
-        general = weighted_progress(status)
-        c1, c2, c3, c4, c5 = st.columns(5)
+        kpis = compute_kpis(activities, progress)
+        general = kpis["avance_general"]
+
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("OTs", ots["id"].nunique())
-        c2.metric("Actividades", activities["id"].nunique())
-        c3.metric("Avance general", f"{general:.0f}%")
-        c4.metric("Actividades culminadas", int((status["avance_real"] >= 100).sum()))
-        c5.metric("Actividades pendientes", int((status["avance_real"] < 100).sum()))
+        c2.metric("Actividades", kpis["actividades"])
+        c3.metric("Avance general", f"{general:.1f}%")
+        c4.metric("Culminadas", kpis["culminadas"])
+        c5.metric("En ejecución", kpis["parciales"])
+        c6.metric("No iniciadas", kpis["no_iniciadas"])
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "SPI",
+            f"{kpis['spi']:.2f}",
+            help="Índice de desempeño del cronograma. Valores menores a 1 indican atraso."
+        )
+        c2.metric("HH planificadas", f"{kpis['hh_plan']:.0f}")
+        c3.metric("HH ganadas", f"{kpis['hh_ganadas']:.0f}")
 
         # CURVA S GENERAL
         curve = build_s_curve(activities, progress)
@@ -764,6 +885,114 @@ if page == "Detalle por OT":
             st.plotly_chart(fig, use_container_width=True)
 
 
+if page == "Evidencias":
+    st.subheader("Galería de evidencias por OT y actividad")
+
+    if progress.empty or "evidencias" not in progress.columns:
+        st.info("Todavía no existen evidencias fotográficas.")
+    else:
+        evidence_progress = progress[
+            progress["evidencias"].apply(lambda x: bool(x))
+        ].copy()
+
+        if evidence_progress.empty:
+            st.info("Todavía no existen evidencias fotográficas.")
+        else:
+            merged = evidence_progress.merge(
+                activities[["id", "ot_id", "codigo_actividad", "descripcion"]],
+                left_on="actividad_id",
+                right_on="id",
+                how="left",
+                suffixes=("", "_actividad"),
+            ).merge(
+                ots[["id", "ot", "equipo"]],
+                left_on="ot_id",
+                right_on="id",
+                how="left",
+                suffixes=("", "_ot"),
+            )
+
+            ot_options = ["TODAS"] + sorted(merged["ot"].astype(str).unique().tolist())
+            selected_ot = st.selectbox("Filtrar por OT", ot_options)
+            if selected_ot != "TODAS":
+                merged = merged[merged["ot"].astype(str) == selected_ot]
+
+            for _, row in merged.sort_values("fecha_registro", ascending=False).iterrows():
+                st.markdown(
+                    f"### OT {row['ot']} · {row.get('codigo_actividad', '')} · "
+                    f"{int(row.get('avance', 0))}%"
+                )
+                st.write(row.get("descripcion_actividad", row.get("descripcion", "")))
+                st.caption(
+                    pd.to_datetime(row["fecha_registro"]).strftime("%d/%m/%Y %H:%M")
+                    if pd.notna(row.get("fecha_registro")) else ""
+                )
+                urls = row.get("evidencias") or []
+                if isinstance(urls, str):
+                    urls = [urls]
+                cols = st.columns(min(3, len(urls)))
+                for index, url in enumerate(urls):
+                    cols[index % len(cols)].image(url, use_container_width=True)
+                st.markdown("---")
+
+
+if page == "Informe diario":
+    st.subheader("Informe diario automático")
+
+    summary_text = build_daily_summary(ots, activities, progress)
+    edited_summary = st.text_area(
+        "Resumen editable",
+        value=summary_text,
+        height=420,
+    )
+
+    st.download_button(
+        "Descargar informe diario en TXT",
+        edited_summary.encode("utf-8"),
+        file_name=f"informe_diario_{datetime.now():%Y%m%d}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+    if not progress.empty:
+        today = pd.Timestamp.now(tz="America/Lima").date()
+        daily = progress[
+            pd.to_datetime(progress["fecha_registro"], errors="coerce").dt.date == today
+        ].copy()
+
+        if not daily.empty:
+            daily_export = daily.merge(
+                activities[["id", "ot_id", "codigo_actividad", "descripcion"]],
+                left_on="actividad_id",
+                right_on="id",
+                how="left",
+                suffixes=("", "_actividad"),
+            ).merge(
+                ots[["id", "ot", "equipo"]],
+                left_on="ot_id",
+                right_on="id",
+                how="left",
+                suffixes=("", "_ot"),
+            )
+
+            if "fecha_registro" in daily_export.columns:
+                daily_export["fecha_registro"] = pd.to_datetime(
+                    daily_export["fecha_registro"], errors="coerce"
+                ).dt.tz_localize(None)
+
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                daily_export.to_excel(writer, index=False, sheet_name="Informe_Diario")
+
+            st.download_button(
+                "Descargar detalle diario en Excel",
+                output.getvalue(),
+                file_name=f"detalle_diario_{datetime.now():%Y%m%d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+
 if page == "Administrar OTs":
     tab1, tab2 = st.tabs(["Nueva OT", "Nueva actividad"])
 
@@ -888,16 +1117,32 @@ if page == "Importar base":
                 ot_text = str(row["ot"]).strip()
                 if ot_text not in ot_map:
                     continue
+                def clean_text(value):
+                    return "" if pd.isna(value) else str(value).strip()
+
+                def clean_date(value):
+                    if pd.isna(value) or value in ("", None):
+                        return None
+                    parsed = pd.to_datetime(value, errors="coerce")
+                    if pd.isna(parsed):
+                        return None
+                    return parsed.date().isoformat()
+
+                def clean_number(value, default=0):
+                    if pd.isna(value) or value in ("", None):
+                        return default
+                    return float(value)
+
                 supabase.table("actividades").insert({
                     "ot_id": int(ot_map[ot_text]),
-                    "codigo_actividad": str(row["codigo_actividad"]).strip(),
-                    "descripcion": str(row["descripcion"]).strip(),
-                    "supervisor": str(row.get("supervisor", "") or ""),
-                    "especialidad": str(row.get("especialidad", "") or ""),
-                    "grupo": str(row.get("grupo", "") or ""),
-                    "peso": float(row.get("peso", 1) or 1),
-                    "inicio_plan": str(row.get("inicio_plan", "") or ""),
-                    "fin_plan": str(row.get("fin_plan", "") or ""),
+                    "codigo_actividad": clean_text(row["codigo_actividad"]),
+                    "descripcion": clean_text(row["descripcion"]),
+                    "supervisor": clean_text(row.get("supervisor")),
+                    "especialidad": clean_text(row.get("especialidad")),
+                    "grupo": clean_text(row.get("grupo")),
+                    "peso": clean_number(row.get("peso"), 1),
+                    "inicio_plan": clean_date(row.get("inicio_plan")),
+                    "fin_plan": clean_date(row.get("fin_plan")),
                 }).execute()
 
             invalidate()
