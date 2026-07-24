@@ -8,6 +8,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib import colors
 from supabase import Client, create_client
 
 st.set_page_config(
@@ -384,6 +388,100 @@ def build_daily_summary(ots: pd.DataFrame, activities: pd.DataFrame, progress: p
     return "\n".join(lines)
 
 
+def build_pdf_report(ots: pd.DataFrame, activities: pd.DataFrame, progress: pd.DataFrame) -> bytes:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=28,
+        leftMargin=28,
+        topMargin=28,
+        bottomMargin=28,
+    )
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("PDP CONTROL CENTER – INFORME EJECUTIVO", styles["Title"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        f"Fecha de emisión: {datetime.now():%d/%m/%Y %H:%M}",
+        styles["Normal"],
+    ))
+    story.append(Spacer(1, 12))
+
+    kpis = compute_kpis(activities, progress)
+    summary_data = [
+        ["Indicador", "Valor"],
+        ["OTs", str(ots["id"].nunique() if not ots.empty else 0)],
+        ["Actividades", str(kpis["actividades"])],
+        ["Avance general", f"{kpis['avance_general']:.1f}%"],
+        ["SPI", f"{kpis['spi']:.2f}"],
+        ["HH planificadas", f"{kpis['hh_plan']:.0f}"],
+        ["HH ganadas", f"{kpis['hh_ganadas']:.0f}"],
+        ["Culminadas", str(kpis["culminadas"])],
+        ["En ejecución", str(kpis["parciales"])],
+        ["No iniciadas", str(kpis["no_iniciadas"])],
+    ]
+    table = Table(summary_data, colWidths=[220, 180])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0B5A9C")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+        ("ALIGN", (1,1), (1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F3F6F9")]),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 18))
+
+    if not progress.empty:
+        daily_summary = build_daily_summary(ots, activities, progress)
+        story.append(Paragraph("Resumen de avances", styles["Heading2"]))
+        for line in daily_summary.split("\n"):
+            if line.strip():
+                story.append(Paragraph(line, styles["BodyText"]))
+            else:
+                story.append(Spacer(1, 6))
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph("Detalle por OT", styles["Heading2"]))
+
+    status = build_activity_status(activities, progress)
+    if not status.empty and not ots.empty:
+        ot_summary = (
+            status.groupby("ot_id")
+            .apply(weighted_progress)
+            .reset_index(name="avance_ot")
+            .merge(
+                ots[["id", "ot", "equipo"]],
+                left_on="ot_id",
+                right_on="id",
+                how="left",
+            )
+        )
+        ot_table = [["OT", "Equipo", "Avance"]]
+        for _, row in ot_summary.sort_values("ot").iterrows():
+            ot_table.append([
+                str(row.get("ot", "")),
+                str(row.get("equipo", "")),
+                f"{row.get('avance_ot', 0):.1f}%",
+            ])
+        table2 = Table(ot_table, colWidths=[95, 255, 70])
+        table2.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0B5A9C")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F3F6F9")]),
+        ]))
+        story.append(table2)
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
 with st.sidebar:
     st.markdown("## MAININ")
     st.caption("Maintenance Ingenuity")
@@ -396,6 +494,7 @@ with st.sidebar:
             "Detalle por OT",
             "Evidencias",
             "Informe diario",
+            "Reporte PDF",
             "Administrar OTs",
             "Importar base",
             "Exportar reporte",
@@ -519,13 +618,19 @@ if page == "Registrar avance":
                     )
 
                     with st.form("avance_form", clear_on_submit=True):
-                        avance = st.number_input(
+                        c1, c2 = st.columns(2)
+                        avance = c1.number_input(
                             "Porcentaje de avance de la actividad (%) *",
                             min_value=0,
                             max_value=100,
                             value=current_value,
                             step=5,
                         )
+                        evidence_stage = c2.selectbox(
+                            "Tipo de evidencia",
+                            ["ANTES", "DURANTE", "DESPUÉS"],
+                        )
+                        critical = st.checkbox("Marcar actividad como crítica")
                         description = st.text_area(
                             "Descripción breve del avance realizado *",
                             height=110,
@@ -562,6 +667,8 @@ if page == "Registrar avance":
                                     "descripcion_avance": description.strip(),
                                     "observaciones": observations.strip(),
                                     "evidencias": urls,
+                                    "tipo_evidencia": evidence_stage,
+                                    "critica": critical,
                                     "usuario": st.session_state.get("username", "Jose"),
                                     "fecha_registro": datetime.now(timezone.utc).isoformat(),
                                 }).execute()
@@ -1008,6 +1115,23 @@ if page == "Informe diario":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+
+
+if page == "Reporte PDF":
+    st.subheader("Generar informe ejecutivo en PDF")
+
+    st.write(
+        "El informe incluye KPIs, avance general, SPI, HH y resumen por OT."
+    )
+
+    pdf_bytes = build_pdf_report(ots, activities, progress)
+    st.download_button(
+        "Descargar informe ejecutivo PDF",
+        data=pdf_bytes,
+        file_name=f"informe_ejecutivo_pdp_{datetime.now():%Y%m%d_%H%M}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
 
 if page == "Administrar OTs":
