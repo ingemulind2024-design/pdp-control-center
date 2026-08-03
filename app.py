@@ -37,12 +37,40 @@ h1,h2,h3 {color:#082d55;}
 """, unsafe_allow_html=True)
 
 
+def load_users() -> dict:
+    """Carga usuarios y roles desde Streamlit Secrets."""
+    users = {}
+
+    try:
+        users_section = st.secrets.get("users", {})
+        for username in users_section:
+            record = users_section[username]
+            users[str(username)] = {
+                "password": str(record.get("password", "")),
+                "role": str(record.get("role", "reporter")).lower(),
+                "name": str(record.get("name", username)),
+            }
+    except Exception:
+        users = {}
+
+    # Compatibilidad con la configuración anterior.
+    if not users:
+        legacy_username = st.secrets.get("auth", {}).get("username", "Jose")
+        legacy_password = st.secrets.get("auth", {}).get("password", "Mainin2026")
+        users[str(legacy_username)] = {
+            "password": str(legacy_password),
+            "role": "admin",
+            "name": str(legacy_username),
+        }
+
+    return users
+
+
 def authenticate() -> bool:
     if st.session_state.get("authenticated"):
         return True
 
-    user_ok = st.secrets.get("auth", {}).get("username", "Jose")
-    pass_ok = st.secrets.get("auth", {}).get("password", "Mainin2026")
+    users = load_users()
 
     st.markdown("""
     <div style="max-width:540px;margin:70px auto 12px auto;padding:42px 35px;
@@ -50,7 +78,7 @@ def authenticate() -> bool:
     box-shadow:0 10px 35px rgba(0,0,0,.10);text-align:center;">
       <div style="font-size:34px;font-weight:800;color:#082d55;">PDP CONTROL CENTER</div>
       <div style="font-size:18px;color:#667085;margin-top:8px;">
-        Gestión de OTs, actividades y avances
+        Control y seguimiento de órdenes de trabajo
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -60,14 +88,23 @@ def authenticate() -> bool:
         with st.form("login"):
             username = st.text_input("Usuario")
             password = st.text_input("Contraseña", type="password")
-            submit = st.form_submit_button("INGRESAR", type="primary", use_container_width=True)
+            submit = st.form_submit_button(
+                "INGRESAR",
+                type="primary",
+                use_container_width=True,
+            )
+
         if submit:
-            if hmac.compare_digest(username, user_ok) and hmac.compare_digest(password, pass_ok):
+            account = users.get(username)
+            if account and hmac.compare_digest(password, account["password"]):
                 st.session_state.authenticated = True
                 st.session_state.username = username
+                st.session_state.display_name = account["name"]
+                st.session_state.role = account["role"]
                 st.rerun()
             else:
                 st.error("Usuario o contraseña incorrectos.")
+
     return False
 
 
@@ -486,9 +523,11 @@ with st.sidebar:
     st.markdown("## MAININ")
     st.caption("Maintenance Ingenuity")
     st.markdown("---")
-    page = st.radio(
-        "Menú",
-        [
+
+    role = st.session_state.get("role", "reporter")
+
+    if role == "admin":
+        menu_options = [
             "Dashboard ejecutivo",
             "Registrar avance",
             "Detalle por OT",
@@ -498,17 +537,46 @@ with st.sidebar:
             "Administrar OTs",
             "Importar base",
             "Exportar reporte",
-        ],
-    )
+        ]
+    else:
+        menu_options = ["Registrar avance"]
+
+    page = st.radio("Menú", menu_options)
+
     st.markdown("---")
-    st.write(f"Usuario: **{st.session_state.get('username', 'Jose')}**")
+    st.write(
+        f"Usuario: **{st.session_state.get('display_name', st.session_state.get('username', ''))}**"
+    )
+    st.caption(
+        "Rol: Administrador" if role == "admin" else "Rol: Reportador de avances"
+    )
+
     if st.button("Cerrar sesión", use_container_width=True):
-        st.session_state.authenticated = False
+        for key in ["authenticated", "username", "display_name", "role"]:
+            st.session_state.pop(key, None)
         st.rerun()
 
 
 st.title("APLICATIVO DE CONTROL Y SEGUIMIENTO DE OTs")
 st.caption("Cada OT puede contener varias actividades, cada una con avance independiente.")
+
+ADMIN_ONLY_PAGES = {
+    "Dashboard ejecutivo",
+    "Detalle por OT",
+    "Evidencias",
+    "Informe diario",
+    "Reporte PDF",
+    "Administrar OTs",
+    "Importar base",
+    "Exportar reporte",
+}
+
+if (
+    st.session_state.get("role", "reporter") != "admin"
+    and page in ADMIN_ONLY_PAGES
+):
+    st.error("No tiene autorización para acceder a este módulo.")
+    st.stop()
 
 ots, activities, progress = load_model()
 activity_status = build_activity_status(activities, progress)
