@@ -715,7 +715,7 @@ if page == "Registrar avance":
                         ot_activities["selector"] == selected_activity_label
                     ].iloc[0]
 
-                    c1, c2 = st.columns(2)
+                    c1, c2, c3 = st.columns(3)
                     c1.text_input(
                         "Código de actividad",
                         value=str(activity.get("codigo_actividad", "")),
