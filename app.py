@@ -228,125 +228,299 @@ def weighted_progress(activity_status: pd.DataFrame) -> float:
     )
 
 
-def build_s_curve(activities: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFrame:
-    """Curva S basada en fechas planificadas, reportes reales y proyección."""
-    columns = ["fecha", "PLAN", "REAL", "PROYECCION_REAL"]
+def build_s_curve(
+    activities: pd.DataFrame,
+    progress: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Curva S calculada por cantidad de actividades, sin ponderación por HH.
+
+    PLAN
+    ----
+    Cada actividad representa la misma proporción del proyecto:
+
+        aporte de una actividad = 100 / total de actividades
+
+    Entre su fecha de inicio y fin, su avance planificado se distribuye
+    linealmente. Antes del inicio aporta 0%; al finalizar aporta 100%.
+
+    REAL
+    ----
+    En cada fecha de corte se toma el último porcentaje reportado de cada
+    actividad. El avance real general es:
+
+        suma de avances de todas las actividades / total de actividades
+
+    Por ejemplo, si existen 100 actividades y 47 están culminadas al 100%,
+    el avance real general será 47%.
+
+    PROYECCION_REAL
+    ---------------
+    Continúa la tendencia desde el último punto real registrado.
+    """
+    output_columns = ["fecha", "PLAN", "REAL", "PROYECCION_REAL"]
+
     if activities.empty:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=output_columns)
 
     acts = activities.copy()
-    acts["peso"] = pd.to_numeric(acts.get("peso", 1), errors="coerce").fillna(1)
-    acts.loc[acts["peso"] <= 0, "peso"] = 1
-    acts["inicio_plan"] = pd.to_datetime(acts.get("inicio_plan"), errors="coerce")
-    acts["fin_plan"] = pd.to_datetime(acts.get("fin_plan"), errors="coerce")
+
+    acts["inicio_plan"] = pd.to_datetime(
+        acts.get("inicio_plan"),
+        errors="coerce",
+    )
+    acts["fin_plan"] = pd.to_datetime(
+        acts.get("fin_plan"),
+        errors="coerce",
+    )
+
     acts["inicio_plan"] = acts["inicio_plan"].fillna(acts["fin_plan"])
     acts["fin_plan"] = acts["fin_plan"].fillna(acts["inicio_plan"])
 
-    invalid = acts["fin_plan"] <= acts["inicio_plan"]
-    acts.loc[invalid, "fin_plan"] = acts.loc[invalid, "inicio_plan"] + pd.Timedelta(hours=1)
-    valid = acts.dropna(subset=["inicio_plan", "fin_plan"]).copy()
-    if valid.empty:
-        return pd.DataFrame(columns=columns)
+    # Dar una duración mínima cuando inicio y fin sean iguales.
+    invalid_duration = acts["fin_plan"] <= acts["inicio_plan"]
+    acts.loc[invalid_duration, "fin_plan"] = (
+        acts.loc[invalid_duration, "inicio_plan"]
+        + pd.Timedelta(minutes=1)
+    )
 
-    total_weight = float(valid["peso"].sum())
+    valid = acts.dropna(subset=["id", "inicio_plan", "fin_plan"]).copy()
+
+    if valid.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    total_activities = len(valid)
     schedule_start = valid["inicio_plan"].min()
     schedule_finish = valid["fin_plan"].max()
 
     prog = progress.copy() if not progress.empty else pd.DataFrame()
     latest_report_time = None
-    if not prog.empty and "fecha_registro" in prog.columns:
-        prog["fecha_registro"] = pd.to_datetime(prog["fecha_registro"], errors="coerce")
+
+    if not prog.empty:
+        prog["fecha_registro"] = pd.to_datetime(
+            prog.get("fecha_registro"),
+            errors="coerce",
+        )
+
         if getattr(prog["fecha_registro"].dt, "tz", None) is not None:
-            prog["fecha_registro"] = prog["fecha_registro"].dt.tz_localize(None)
-        prog = prog.dropna(subset=["fecha_registro"])
+            prog["fecha_registro"] = (
+                prog["fecha_registro"].dt.tz_localize(None)
+            )
+
+        prog["avance"] = pd.to_numeric(
+            prog.get("avance"),
+            errors="coerce",
+        ).fillna(0).clip(0, 100)
+
+        prog = prog.dropna(
+            subset=["actividad_id", "fecha_registro"]
+        )
+
         if not prog.empty:
             latest_report_time = prog["fecha_registro"].max()
 
-    cut_hours = (0, 14, 19)
-    start_day = schedule_start.normalize()
-    end_day = schedule_finish.normalize()
-    if latest_report_time is not None and latest_report_time.normalize() > end_day:
-        end_day = latest_report_time.normalize()
-    projection_end_day = end_day + pd.Timedelta(days=3)
+    # Los puntos del gráfico se forman con las fechas reales de la tabla:
+    # inicios, finales y fechas de reportes.
+    event_dates = set(
+        valid["inicio_plan"].dropna().tolist()
+        + valid["fin_plan"].dropna().tolist()
+    )
 
-    cut_points = []
-    day = start_day
-    while day <= projection_end_day:
-        for hour in cut_hours:
-            cut_points.append(day + pd.Timedelta(hours=hour))
-        day += pd.Timedelta(days=1)
-
-    plan_values = []
-    for cutoff in cut_points:
-        weighted_plan = 0.0
-        for _, activity in valid.iterrows():
-            a_start = activity["inicio_plan"]
-            a_finish = activity["fin_plan"]
-            weight = float(activity["peso"])
-            if cutoff <= a_start:
-                pct = 0.0
-            elif cutoff >= a_finish:
-                pct = 100.0
-            else:
-                duration = (a_finish - a_start).total_seconds()
-                elapsed = (cutoff - a_start).total_seconds()
-                pct = elapsed / duration * 100.0 if duration > 0 else 100.0
-            weighted_plan += max(0.0, min(100.0, pct)) * weight
-        plan_values.append(weighted_plan / total_weight)
-
-    real_values = [None] * len(cut_points)
     if not prog.empty:
-        prog["avance"] = pd.to_numeric(prog["avance"], errors="coerce").fillna(0)
-        weight_map = valid.set_index("id")["peso"].to_dict()
+        event_dates.update(prog["fecha_registro"].dropna().tolist())
+
+    # Punto inicial explícito en 0%.
+    event_dates.add(schedule_start)
+
+    # Añadir horizonte para mostrar la proyección real.
+    projection_limit = max(
+        schedule_finish,
+        latest_report_time if latest_report_time is not None else schedule_finish,
+    ) + pd.Timedelta(days=3)
+
+    event_dates.add(projection_limit)
+
+    cut_points = sorted(pd.to_datetime(list(event_dates)))
+
+    # PLAN: promedio simple de los porcentajes planificados por actividad.
+    plan_values = []
+
+    for cutoff in cut_points:
+        activity_plan_percentages = []
+
+        for _, activity in valid.iterrows():
+            activity_start = activity["inicio_plan"]
+            activity_finish = activity["fin_plan"]
+
+            if cutoff <= activity_start:
+                planned_percentage = 0.0
+            elif cutoff >= activity_finish:
+                planned_percentage = 100.0
+            else:
+                duration_seconds = (
+                    activity_finish - activity_start
+                ).total_seconds()
+                elapsed_seconds = (
+                    cutoff - activity_start
+                ).total_seconds()
+
+                planned_percentage = (
+                    elapsed_seconds / duration_seconds * 100.0
+                    if duration_seconds > 0
+                    else 100.0
+                )
+
+            activity_plan_percentages.append(
+                max(0.0, min(100.0, planned_percentage))
+            )
+
+        plan_values.append(
+            sum(activity_plan_percentages) / total_activities
+        )
+
+    # REAL: promedio simple de los últimos avances de todas las actividades.
+    real_values = [None] * len(cut_points)
+
+    if not prog.empty:
+        activity_ids = valid["id"].tolist()
+
         for index, cutoff in enumerate(cut_points):
-            if latest_report_time is not None and cutoff > latest_report_time:
+            if (
+                latest_report_time is not None
+                and cutoff > latest_report_time
+            ):
                 continue
+
             available = prog[prog["fecha_registro"] <= cutoff]
+
             if available.empty:
                 real_values[index] = 0.0
                 continue
-            latest = available.sort_values("fecha_registro").groupby("actividad_id", as_index=False).tail(1)
-            weighted_real = sum(float(row["avance"]) * float(weight_map.get(row["actividad_id"], 0)) for _, row in latest.iterrows())
-            real_values[index] = weighted_real / total_weight
-    elif cut_points:
+
+            latest_per_activity = (
+                available.sort_values("fecha_registro")
+                .groupby("actividad_id", as_index=False)
+                .tail(1)
+                .set_index("actividad_id")["avance"]
+                .to_dict()
+            )
+
+            total_real = sum(
+                float(latest_per_activity.get(activity_id, 0.0))
+                for activity_id in activity_ids
+            )
+
+            real_values[index] = total_real / total_activities
+    else:
         real_values[0] = 0.0
 
-    curve = pd.DataFrame({"fecha": pd.to_datetime(cut_points), "PLAN": plan_values, "REAL": real_values})
-    curve["PLAN"] = curve["PLAN"].clip(0, 100).cummax()
-    real_idx = curve.index[curve["REAL"].notna()].tolist()
-    if real_idx:
-        curve.loc[real_idx, "REAL"] = curve.loc[real_idx, "REAL"].clip(0, 100).cummax()
+    curve = pd.DataFrame({
+        "fecha": cut_points,
+        "PLAN": plan_values,
+        "REAL": real_values,
+    })
 
+    curve["PLAN"] = (
+        pd.to_numeric(curve["PLAN"], errors="coerce")
+        .fillna(0)
+        .clip(0, 100)
+        .cummax()
+    )
+
+    actual_indexes = curve.index[curve["REAL"].notna()].tolist()
+
+    if actual_indexes:
+        actual_series = (
+            pd.to_numeric(
+                curve.loc[actual_indexes, "REAL"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .clip(0, 100)
+            .cummax()
+        )
+        curve.loc[actual_indexes, "REAL"] = actual_series
+
+    # Proyección de la curva real según la tendencia reciente.
     curve["PROYECCION_REAL"] = None
-    if real_idx:
-        last_idx = real_idx[-1]
-        last_value = float(curve.loc[last_idx, "REAL"])
-        last_date = curve.loc[last_idx, "fecha"]
-        hist = curve.loc[real_idx, ["fecha", "REAL"]].drop_duplicates(subset=["REAL"], keep="last").tail(4)
-        rate = 0.0
-        if len(hist) >= 2:
-            first, last = hist.iloc[0], hist.iloc[-1]
-            hours = (last["fecha"] - first["fecha"]).total_seconds() / 3600
-            gained = float(last["REAL"]) - float(first["REAL"])
-            if hours > 0 and gained > 0:
-                rate = gained / hours
-        if rate <= 0 and last_value > 0:
-            hours = (last_date - schedule_start).total_seconds() / 3600
-            if hours > 0:
-                rate = last_value / hours
-        curve.loc[last_idx, "PROYECCION_REAL"] = last_value
-        if rate > 0 and last_value < 100:
-            for idx in range(last_idx + 1, len(curve)):
-                forward = (curve.loc[idx, "fecha"] - last_date).total_seconds() / 3600
-                projected = min(100.0, last_value + rate * forward)
-                curve.loc[idx, "PROYECCION_REAL"] = projected
-                if projected >= 100:
+
+    if actual_indexes:
+        last_actual_index = actual_indexes[-1]
+        last_actual_date = curve.loc[last_actual_index, "fecha"]
+        last_actual_value = float(
+            curve.loc[last_actual_index, "REAL"]
+        )
+
+        actual_history = curve.loc[
+            actual_indexes,
+            ["fecha", "REAL"],
+        ].drop_duplicates(
+            subset=["REAL"],
+            keep="last",
+        ).tail(4)
+
+        hourly_rate = 0.0
+
+        if len(actual_history) >= 2:
+            first_point = actual_history.iloc[0]
+            last_point = actual_history.iloc[-1]
+
+            elapsed_hours = (
+                last_point["fecha"] - first_point["fecha"]
+            ).total_seconds() / 3600
+
+            gained_percentage = (
+                float(last_point["REAL"])
+                - float(first_point["REAL"])
+            )
+
+            if elapsed_hours > 0 and gained_percentage > 0:
+                hourly_rate = gained_percentage / elapsed_hours
+
+        if hourly_rate <= 0 and last_actual_value > 0:
+            elapsed_hours = (
+                last_actual_date - schedule_start
+            ).total_seconds() / 3600
+
+            if elapsed_hours > 0:
+                hourly_rate = last_actual_value / elapsed_hours
+
+        curve.loc[
+            last_actual_index,
+            "PROYECCION_REAL",
+        ] = last_actual_value
+
+        if hourly_rate > 0 and last_actual_value < 100:
+            for index in range(
+                last_actual_index + 1,
+                len(curve),
+            ):
+                hours_forward = (
+                    curve.loc[index, "fecha"]
+                    - last_actual_date
+                ).total_seconds() / 3600
+
+                projected_percentage = min(
+                    100.0,
+                    last_actual_value
+                    + hourly_rate * hours_forward,
+                )
+
+                curve.loc[
+                    index,
+                    "PROYECCION_REAL",
+                ] = projected_percentage
+
+                if projected_percentage >= 100:
                     break
 
-    if not curve.empty:
-        curve.loc[curve.index[0], "PLAN"] = 0.0
-        if pd.isna(curve.loc[curve.index[0], "REAL"]):
-            curve.loc[curve.index[0], "REAL"] = 0.0
+    # Inicio exacto en 0%.
+    first_index = curve.index[0]
+    curve.loc[first_index, "PLAN"] = 0.0
+
+    if pd.isna(curve.loc[first_index, "REAL"]):
+        curve.loc[first_index, "REAL"] = 0.0
+
     return curve
 
 
@@ -859,7 +1033,7 @@ if page == "Dashboard ejecutivo":
         ]
 
         fig_curve.update_layout(
-            title="Curva S – Avance general acumulado",
+            title="Curva S – Avance acumulado por actividades",
             xaxis_title="Fecha / corte operativo",
             yaxis_title="Avance acumulado (%)",
             yaxis_range=[0, 105],
@@ -881,6 +1055,13 @@ if page == "Dashboard ejecutivo":
             ),
         )
         st.plotly_chart(fig_curve, use_container_width=True)
+
+        st.caption(
+            "PLAN y REAL se calculan por cantidad de actividades. "
+            "Cada actividad tiene el mismo peso, independientemente de sus HH. "
+            "El PLAN usa sus fechas de inicio y fin; el REAL usa el último "
+            "porcentaje reportado de cada actividad."
+        )
 
         projection_points = curve.dropna(subset=["PROYECCION_REAL"])
         projected_finish = projection_points[projection_points["PROYECCION_REAL"] >= 100]
