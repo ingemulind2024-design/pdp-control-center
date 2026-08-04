@@ -233,20 +233,23 @@ def build_s_curve(
     progress: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Curva S construida exclusivamente con los datos de la tabla importada.
+    Curva S por cantidad de actividades y cuatro cortes diarios.
+
+    Cortes:
+    - 00:00
+    - 07:00
+    - 14:00
+    - 19:00
 
     PLAN:
-    - Usa inicio_plan y fin_plan de cada actividad.
-    - Cada actividad tiene el mismo peso.
-    - El plan de cada actividad crece de 0% a 100% entre ambas fechas.
-    - El PLAN general es el promedio de todas las actividades.
+    Se calcula exclusivamente con inicio_plan y fin_plan importados desde
+    la hoja Actividades. Cada actividad tiene el mismo peso.
 
     REAL:
-    - Usa únicamente los avances registrados en la aplicación.
-    - En cada fecha toma el último avance de cada actividad.
-    - Las actividades sin reporte se consideran en 0%.
+    Se calcula con el último porcentaje registrado de cada actividad hasta
+    cada corte. Las actividades sin reporte valen 0%.
 
-    No utiliza HH ni calcula proyección real.
+    No utiliza HH y no realiza proyección futura.
     """
     if activities.empty:
         return pd.DataFrame(columns=["fecha", "PLAN", "REAL"])
@@ -262,12 +265,19 @@ def build_s_curve(
         errors="coerce",
     )
 
+    # Eliminar zona horaria si existe para trabajar en hora local de la PDP.
+    for column in ["inicio_plan", "fin_plan"]:
+        if getattr(acts[column].dt, "tz", None) is not None:
+            acts[column] = acts[column].dt.tz_localize(None)
+
     acts["inicio_plan"] = acts["inicio_plan"].fillna(acts["fin_plan"])
     acts["fin_plan"] = acts["fin_plan"].fillna(acts["inicio_plan"])
 
-    invalid = acts["fin_plan"] <= acts["inicio_plan"]
-    acts.loc[invalid, "fin_plan"] = (
-        acts.loc[invalid, "inicio_plan"] + pd.Timedelta(minutes=1)
+    # Duración mínima para actividades con fechas iguales.
+    invalid_duration = acts["fin_plan"] <= acts["inicio_plan"]
+    acts.loc[invalid_duration, "fin_plan"] = (
+        acts.loc[invalid_duration, "inicio_plan"]
+        + pd.Timedelta(minutes=1)
     )
 
     valid = acts.dropna(
@@ -278,12 +288,11 @@ def build_s_curve(
         return pd.DataFrame(columns=["fecha", "PLAN", "REAL"])
 
     total_activities = len(valid)
-
-    # Los puntos del gráfico salen directamente de las fechas de la tabla.
-    event_dates = set(valid["inicio_plan"].tolist())
-    event_dates.update(valid["fin_plan"].tolist())
+    schedule_start = valid["inicio_plan"].min()
+    schedule_finish = valid["fin_plan"].max()
 
     prog = progress.copy() if not progress.empty else pd.DataFrame()
+    latest_report_time = None
 
     if not prog.empty:
         prog["fecha_registro"] = pd.to_datetime(
@@ -305,14 +314,53 @@ def build_s_curve(
             subset=["actividad_id", "fecha_registro"]
         )
 
-        event_dates.update(prog["fecha_registro"].tolist())
+        if not prog.empty:
+            latest_report_time = prog["fecha_registro"].max()
 
-    cut_points = sorted(pd.to_datetime(list(event_dates)))
+    # Extender el eje solo cuando existan reportes posteriores al fin del plan.
+    curve_finish = schedule_finish
+    if latest_report_time is not None:
+        curve_finish = max(curve_finish, latest_report_time)
 
+    cut_hours = (0, 7, 14, 19)
+    start_day = schedule_start.normalize()
+    finish_day = curve_finish.normalize()
+
+    cut_points = []
+    current_day = start_day
+
+    while current_day <= finish_day:
+        for hour in cut_hours:
+            cutoff = current_day + pd.Timedelta(hours=hour)
+
+            # Incluir todos los cortes del primer y último día para que la
+            # curva empiece en 0% y cierre después del último fin planificado.
+            if cutoff >= start_day and cutoff <= finish_day + pd.Timedelta(hours=19):
+                cut_points.append(cutoff)
+
+        current_day += pd.Timedelta(days=1)
+
+    # Mantener únicamente hasta el primer corte que cubra el fin real del eje.
+    cut_points = sorted(set(cut_points))
+    closing_indexes = [
+        index
+        for index, cutoff in enumerate(cut_points)
+        if cutoff >= curve_finish
+    ]
+    if closing_indexes:
+        cut_points = cut_points[: closing_indexes[0] + 1]
+
+    # Garantizar un punto inicial en 0%.
+    if not cut_points or cut_points[0] > start_day:
+        cut_points.insert(0, start_day)
+
+    # ------------------------------------------------------------------
+    # PLAN: promedio del avance temporal de todas las actividades.
+    # ------------------------------------------------------------------
     plan_values = []
 
     for cutoff in cut_points:
-        accumulated_plan = 0.0
+        total_planned_percentage = 0.0
 
         for _, activity in valid.iterrows():
             activity_start = activity["inicio_plan"]
@@ -336,21 +384,30 @@ def build_s_curve(
                     else 100.0
                 )
 
-            accumulated_plan += max(
+            total_planned_percentage += max(
                 0.0,
                 min(100.0, activity_plan),
             )
 
         plan_values.append(
-            accumulated_plan / total_activities
+            total_planned_percentage / total_activities
         )
 
+    # ------------------------------------------------------------------
+    # REAL: promedio del último reporte por actividad hasta cada corte.
+    # La línea se dibuja solo hasta el corte que contiene el último reporte.
+    # ------------------------------------------------------------------
     activity_ids = valid["id"].tolist()
     real_values = []
 
     for cutoff in cut_points:
         if prog.empty:
-            real_values.append(0.0)
+            real_values.append(0.0 if cutoff == cut_points[0] else None)
+            continue
+
+        # No mostrar REAL en puntos futuros sin información.
+        if latest_report_time is not None and cutoff > latest_report_time:
+            real_values.append(None)
             continue
 
         available = prog[
@@ -369,17 +426,17 @@ def build_s_curve(
             .to_dict()
         )
 
-        total_real = sum(
+        total_real_percentage = sum(
             float(latest_per_activity.get(activity_id, 0.0))
             for activity_id in activity_ids
         )
 
         real_values.append(
-            total_real / total_activities
+            total_real_percentage / total_activities
         )
 
     curve = pd.DataFrame({
-        "fecha": cut_points,
+        "fecha": pd.to_datetime(cut_points),
         "PLAN": plan_values,
         "REAL": real_values,
     })
@@ -391,14 +448,22 @@ def build_s_curve(
         .cummax()
     )
 
-    curve["REAL"] = (
-        pd.to_numeric(curve["REAL"], errors="coerce")
-        .fillna(0)
-        .clip(0, 100)
-        .cummax()
-    )
+    real_indexes = curve.index[curve["REAL"].notna()].tolist()
+    if real_indexes:
+        real_series = (
+            pd.to_numeric(
+                curve.loc[real_indexes, "REAL"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .clip(0, 100)
+            .cummax()
+        )
+        curve.loc[real_indexes, "REAL"] = real_series
 
-    curve.loc[curve.index[0], ["PLAN", "REAL"]] = [0.0, 0.0]
+    curve.loc[curve.index[0], "PLAN"] = 0.0
+    if pd.isna(curve.loc[curve.index[0], "REAL"]):
+        curve.loc[curve.index[0], "REAL"] = 0.0
 
     return curve
 
@@ -879,7 +944,7 @@ if page == "Dashboard ejecutivo":
             y=curve["PLAN"],
             mode="lines+markers+text",
             name="PLAN",
-            line=dict(shape="spline", smoothing=0.8, width=4),
+            line=dict(shape="spline", smoothing=0.45, width=4),
             marker=dict(size=8),
             text=[f"{v:.0f}" if pd.notna(v) else "" for v in curve["PLAN"]],
             textposition="top center",
@@ -890,7 +955,7 @@ if page == "Dashboard ejecutivo":
             y=curve["REAL"],
             mode="lines+markers+text",
             name="REAL",
-            line=dict(shape="spline", smoothing=0.8, width=4),
+            line=dict(shape="spline", smoothing=0.45, width=4),
             marker=dict(size=8),
             text=[f"{v:.0f}" if pd.notna(v) else "" for v in curve["REAL"]],
             textposition="bottom center",
@@ -903,7 +968,7 @@ if page == "Dashboard ejecutivo":
         ]
 
         fig_curve.update_layout(
-            title="Curva S – Plan y real según fechas de la tabla",
+            title="Curva S – Avance planificado y real por cortes operativos",
             xaxis_title="Fecha / corte operativo",
             yaxis_title="Avance acumulado (%)",
             yaxis_range=[0, 105],
@@ -927,10 +992,10 @@ if page == "Dashboard ejecutivo":
         st.plotly_chart(fig_curve, use_container_width=True)
 
         st.caption(
-            "PLAN y REAL se calculan por cantidad de actividades. "
-            "Cada actividad tiene el mismo peso, independientemente de sus HH. "
-            "El PLAN usa sus fechas de inicio y fin; el REAL usa el último "
-            "porcentaje reportado de cada actividad."
+            "La curva se calcula con cuatro cortes diarios: 00:00, 07:00, "
+            "14:00 y 19:00. El PLAN utiliza inicio_plan y fin_plan de cada "
+            "actividad importada. El REAL utiliza el último avance reportado "
+            "de cada actividad. No se utilizan HH ni proyección futura."
         )
 
         left, right = st.columns([1.25, 1])
@@ -1499,13 +1564,27 @@ if page == "Importar base":
                 def clean_text(value):
                     return "" if pd.isna(value) else str(value).strip()
 
-                def clean_date(value):
+                def clean_datetime(value):
+                    """
+                    Conserva fecha y hora del Excel.
+                    Ejemplo: 04/08/2026 14:00 -> 2026-08-04T14:00:00
+                    """
                     if pd.isna(value) or value in ("", None):
                         return None
-                    parsed = pd.to_datetime(value, errors="coerce")
+
+                    parsed = pd.to_datetime(
+                        value,
+                        errors="coerce",
+                        dayfirst=True,
+                    )
+
                     if pd.isna(parsed):
                         return None
-                    return parsed.date().isoformat()
+
+                    if getattr(parsed, "tzinfo", None) is not None:
+                        parsed = parsed.tz_localize(None)
+
+                    return parsed.isoformat(timespec="seconds")
 
                 def clean_number(value, default=0):
                     if pd.isna(value) or value in ("", None):
@@ -1558,8 +1637,8 @@ if page == "Importar base":
                         "especialidad": clean_text(row.get("especialidad")),
                         "grupo": clean_text(row.get("grupo")),
                         "peso": clean_number(row.get("peso"), 1),
-                        "inicio_plan": clean_date(row.get("inicio_plan")),
-                        "fin_plan": clean_date(row.get("fin_plan")),
+                        "inicio_plan": clean_datetime(row.get("inicio_plan")),
+                        "fin_plan": clean_datetime(row.get("fin_plan")),
                     })
 
                 if not clean_ots:
