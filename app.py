@@ -392,6 +392,15 @@ def build_s_curve(activities: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFr
     curve["PLAN"] = curve["PLAN"].clip(0, 100).cummax()
     curve["REAL"] = curve["REAL"].clip(0, 100).cummax()
 
+    if not progress.empty and "fecha_registro" in progress.columns:
+        latest_real_time = pd.to_datetime(
+            progress["fecha_registro"], errors="coerce"
+        ).max()
+        if pd.notna(latest_real_time):
+            if getattr(latest_real_time, "tzinfo", None) is not None:
+                latest_real_time = latest_real_time.tz_localize(None)
+            curve.loc[curve["fecha"] > latest_real_time, "REAL"] = None
+
     curve.loc[curve.index[0], ["PLAN", "REAL"]] = [0.0, 0.0]
 
     # La última marca planificada debe cerrar exactamente en 100%.
@@ -873,12 +882,26 @@ if page == "Dashboard ejecutivo":
         curve = build_s_curve(activities, progress)
         fig_curve = go.Figure()
         fig_curve.add_trace(go.Scatter(
-            x=curve["fecha"], y=curve["PLAN"],
-            mode="lines+markers", name="PLAN"
+            x=curve["fecha"],
+            y=curve["PLAN"],
+            mode="lines+markers+text",
+            name="PLAN",
+            line=dict(shape="spline", smoothing=0.8, width=4),
+            marker=dict(size=8),
+            text=[f"{v:.0f}" if pd.notna(v) else "" for v in curve["PLAN"]],
+            textposition="top center",
+            connectgaps=False,
         ))
         fig_curve.add_trace(go.Scatter(
-            x=curve["fecha"], y=curve["REAL"],
-            mode="lines+markers", name="REAL"
+            x=curve["fecha"],
+            y=curve["REAL"],
+            mode="lines+markers+text",
+            name="REAL",
+            line=dict(shape="spline", smoothing=0.8, width=4),
+            marker=dict(size=8),
+            text=[f"{v:.0f}" if pd.notna(v) else "" for v in curve["REAL"]],
+            textposition="bottom center",
+            connectgaps=False,
         ))
         tick_values = curve["fecha"].tolist()
         tick_labels = [
@@ -903,8 +926,6 @@ if page == "Dashboard ejecutivo":
             type="date",
         )
         fig_curve.update_traces(
-            line_shape="linear",
-            marker_size=7,
             hovertemplate=(
                 "%{x|%d/%m/%Y %H:%M}<br>"
                 "Avance: %{y:.2f}%<extra>%{fullData.name}</extra>"
