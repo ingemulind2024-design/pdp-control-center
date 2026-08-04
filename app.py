@@ -229,82 +229,175 @@ def weighted_progress(activity_status: pd.DataFrame) -> float:
 
 
 def build_s_curve(activities: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFrame:
-    """Curva S acumulada: PLAN lineal por duración y REAL por reportes."""
+    """
+    Curva S acumulada con tres cortes operativos diarios:
+    00:00, 14:00 y 19:00.
+
+    PLAN:
+    Distribuye linealmente el peso de cada actividad entre el inicio y fin.
+
+    REAL:
+    Calcula el último avance reportado por actividad hasta cada corte.
+    """
     if activities.empty:
         return pd.DataFrame(columns=["fecha", "PLAN", "REAL"])
 
     acts = activities.copy()
-    acts["peso"] = pd.to_numeric(acts.get("peso", 1), errors="coerce").fillna(1)
+    acts["peso"] = pd.to_numeric(
+        acts.get("peso", 1), errors="coerce"
+    ).fillna(1)
     acts.loc[acts["peso"] <= 0, "peso"] = 1
-    acts["inicio_plan"] = pd.to_datetime(acts.get("inicio_plan"), errors="coerce")
-    acts["fin_plan"] = pd.to_datetime(acts.get("fin_plan"), errors="coerce")
+
+    acts["inicio_plan"] = pd.to_datetime(
+        acts.get("inicio_plan"), errors="coerce"
+    )
+    acts["fin_plan"] = pd.to_datetime(
+        acts.get("fin_plan"), errors="coerce"
+    )
+
     acts["inicio_plan"] = acts["inicio_plan"].fillna(acts["fin_plan"])
     acts["fin_plan"] = acts["fin_plan"].fillna(acts["inicio_plan"])
 
     invalid = acts["fin_plan"] <= acts["inicio_plan"]
-    acts.loc[invalid, "fin_plan"] = acts.loc[invalid, "inicio_plan"] + pd.Timedelta(days=1)
-    valid = acts.dropna(subset=["inicio_plan", "fin_plan"]).copy()
+    acts.loc[invalid, "fin_plan"] = (
+        acts.loc[invalid, "inicio_plan"] + pd.Timedelta(hours=1)
+    )
 
+    valid = acts.dropna(subset=["inicio_plan", "fin_plan"]).copy()
     if valid.empty:
         today = pd.Timestamp.today().normalize()
-        return pd.DataFrame({"fecha":[today], "PLAN":[0.0], "REAL":[0.0]})
+        return pd.DataFrame({
+            "fecha": [
+                today,
+                today + pd.Timedelta(hours=14),
+                today + pd.Timedelta(hours=19),
+            ],
+            "PLAN": [0.0, 0.0, 0.0],
+            "REAL": [0.0, 0.0, 0.0],
+        })
 
     total_weight = float(valid["peso"].sum())
-    start_date = valid["inicio_plan"].min().normalize()
-    end_date = valid["fin_plan"].max().normalize()
 
+    first_activity = valid["inicio_plan"].min()
+    last_activity = valid["fin_plan"].max()
+
+    real_dates = pd.Series(dtype="datetime64[ns]")
     if not progress.empty and "fecha_registro" in progress.columns:
-        real_dates = pd.to_datetime(progress["fecha_registro"], errors="coerce").dropna()
+        real_dates = pd.to_datetime(
+            progress["fecha_registro"], errors="coerce"
+        ).dropna()
         if getattr(real_dates.dt, "tz", None) is not None:
             real_dates = real_dates.dt.tz_localize(None)
-        if not real_dates.empty:
-            end_date = max(end_date, real_dates.max().normalize())
 
-    date_index = pd.date_range(start_date - pd.Timedelta(days=1), end_date, freq="D")
+    last_required = last_activity
+    if not real_dates.empty:
+        last_required = max(last_required, real_dates.max())
+
+    # Comenzar en el corte 00:00 del día inicial.
+    start_day = first_activity.normalize()
+
+    # Extender hasta que el último corte cubra el fin del cronograma.
+    end_day = last_required.normalize()
+    if last_required.hour >= 19:
+        end_day = end_day + pd.Timedelta(days=1)
+
+    cut_hours = (0, 14, 19)
+    cut_points = []
+    current_day = start_day
+    while current_day <= end_day:
+        for hour in cut_hours:
+            cut_points.append(current_day + pd.Timedelta(hours=hour))
+        current_day += pd.Timedelta(days=1)
+
+    # Punto inicial explícito en 0%, incluso si hay actividades antes de 00:00.
+    if cut_points[0] > first_activity:
+        cut_points.insert(0, first_activity.normalize())
 
     plan_values = []
-    for current_date in date_index:
-        t = current_date + pd.Timedelta(hours=23, minutes=59, seconds=59)
-        weighted = 0.0
-        for _, act in valid.iterrows():
-            start_t = act["inicio_plan"]
-            finish_t = act["fin_plan"]
-            weight = float(act["peso"])
-            if t < start_t:
-                pct = 0.0
-            elif t >= finish_t:
-                pct = 100.0
+    for cutoff in cut_points:
+        weighted_plan = 0.0
+
+        for _, activity in valid.iterrows():
+            activity_start = activity["inicio_plan"]
+            activity_finish = activity["fin_plan"]
+            weight = float(activity["peso"])
+
+            if cutoff <= activity_start:
+                activity_plan = 0.0
+            elif cutoff >= activity_finish:
+                activity_plan = 100.0
             else:
-                pct = ((t - start_t).total_seconds() / (finish_t - start_t).total_seconds()) * 100.0
-            weighted += max(0.0, min(100.0, pct)) * weight
-        plan_values.append(weighted / total_weight)
+                duration = (
+                    activity_finish - activity_start
+                ).total_seconds()
+                elapsed = (
+                    cutoff - activity_start
+                ).total_seconds()
+                activity_plan = elapsed / duration * 100.0
+
+            activity_plan = max(0.0, min(100.0, activity_plan))
+            weighted_plan += activity_plan * weight
+
+        plan_values.append(weighted_plan / total_weight)
 
     real_values = []
     if progress.empty:
-        real_values = [0.0] * len(date_index)
+        real_values = [0.0] * len(cut_points)
     else:
         prog = progress.copy()
-        prog["fecha_registro"] = pd.to_datetime(prog["fecha_registro"], errors="coerce")
+        prog["fecha_registro"] = pd.to_datetime(
+            prog["fecha_registro"], errors="coerce"
+        )
         if getattr(prog["fecha_registro"].dt, "tz", None) is not None:
-            prog["fecha_registro"] = prog["fecha_registro"].dt.tz_localize(None)
-        prog["avance"] = pd.to_numeric(prog["avance"], errors="coerce").fillna(0)
+            prog["fecha_registro"] = (
+                prog["fecha_registro"].dt.tz_localize(None)
+            )
+
+        prog["avance"] = pd.to_numeric(
+            prog["avance"], errors="coerce"
+        ).fillna(0)
+
         weight_map = valid.set_index("id")["peso"].to_dict()
 
-        for current_date in date_index:
-            cutoff = current_date + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        for cutoff in cut_points:
             available = prog[prog["fecha_registro"] <= cutoff]
+
             if available.empty:
                 real_values.append(0.0)
                 continue
-            latest = available.sort_values("fecha_registro").groupby("actividad_id", as_index=False).tail(1)
-            weighted = sum(float(r["avance"]) * float(weight_map.get(r["actividad_id"], 0)) for _, r in latest.iterrows())
-            real_values.append(weighted / total_weight)
 
-    curve = pd.DataFrame({"fecha": date_index, "PLAN": plan_values, "REAL": real_values})
+            latest = (
+                available.sort_values("fecha_registro")
+                .groupby("actividad_id", as_index=False)
+                .tail(1)
+            )
+
+            weighted_real = 0.0
+            for _, report in latest.iterrows():
+                activity_weight = float(
+                    weight_map.get(report["actividad_id"], 0)
+                )
+                weighted_real += (
+                    float(report["avance"]) * activity_weight
+                )
+
+            real_values.append(weighted_real / total_weight)
+
+    curve = pd.DataFrame({
+        "fecha": pd.to_datetime(cut_points),
+        "PLAN": plan_values,
+        "REAL": real_values,
+    })
+
     curve["PLAN"] = curve["PLAN"].clip(0, 100).cummax()
     curve["REAL"] = curve["REAL"].clip(0, 100).cummax()
+
     curve.loc[curve.index[0], ["PLAN", "REAL"]] = [0.0, 0.0]
-    curve.loc[curve.index[-1], "PLAN"] = 100.0
+
+    # La última marca planificada debe cerrar exactamente en 100%.
+    if curve.iloc[-1]["fecha"] >= last_activity:
+        curve.loc[curve.index[-1], "PLAN"] = 100.0
+
     return curve
 
 
@@ -787,16 +880,36 @@ if page == "Dashboard ejecutivo":
             x=curve["fecha"], y=curve["REAL"],
             mode="lines+markers", name="REAL"
         ))
+        tick_values = curve["fecha"].tolist()
+        tick_labels = [
+            fecha.strftime("%d/%m<br>%H:%M")
+            for fecha in curve["fecha"]
+        ]
+
         fig_curve.update_layout(
             title="Curva S – Avance general acumulado",
-            xaxis_title="Fecha",
+            xaxis_title="Fecha / corte operativo",
             yaxis_title="Avance acumulado (%)",
             yaxis_range=[0, 105],
             legend_orientation="h",
             hovermode="x unified",
-            height=460,
+            height=500,
         )
-        fig_curve.update_traces(line_shape="spline", line_smoothing=0.8, marker_size=5)
+        fig_curve.update_xaxes(
+            tickmode="array",
+            tickvals=tick_values,
+            ticktext=tick_labels,
+            tickangle=-45,
+            type="date",
+        )
+        fig_curve.update_traces(
+            line_shape="linear",
+            marker_size=7,
+            hovertemplate=(
+                "%{x|%d/%m/%Y %H:%M}<br>"
+                "Avance: %{y:.2f}%<extra>%{fullData.name}</extra>"
+            ),
+        )
         st.plotly_chart(fig_curve, use_container_width=True)
 
         left, right = st.columns([1.25, 1])
