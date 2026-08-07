@@ -233,22 +233,24 @@ def build_s_curve(
     progress: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Curva S por cantidad de actividades.
+    Curva S por promedio de avance de TODAS las actividades.
 
     Eje temporal:
-    1) Fecha/hora exacta de inicio del cronograma.
-    2) Cortes operativos intermedios: 00:00, 07:00, 14:00 y 19:00.
-    3) Fecha/hora exacta de fin del cronograma.
+    - inicio exacto = menor inicio_plan;
+    - cortes intermedios = 00:00, 07:00, 14:00 y 19:00;
+    - fin exacto = mayor fin_plan.
 
     PLAN:
-    Se calcula con inicio_plan y fin_plan de cada actividad.
-    Cada actividad tiene el mismo peso.
+    Para cada actividad calcula el porcentaje planificado esperado según el
+    tiempo transcurrido entre inicio_plan y fin_plan. El PLAN general es el
+    promedio simple de todas las actividades.
 
     REAL:
-    Se calcula con el último porcentaje registrado de cada actividad
-    hasta cada punto temporal. Las actividades sin reporte valen 0%.
+    Para cada actividad toma el último porcentaje reportado hasta cada corte.
+    Las actividades sin reporte se consideran 0%. El REAL general es el
+    promedio simple de todas las actividades.
 
-    No utiliza HH y no realiza proyección futura.
+    No utiliza OTs, HH ni pesos.
     """
     if activities.empty:
         return pd.DataFrame(columns=["fecha", "PLAN", "REAL"])
@@ -288,33 +290,9 @@ def build_s_curve(
     schedule_start = valid["inicio_plan"].min()
     schedule_finish = valid["fin_plan"].max()
 
-    prog = progress.copy() if not progress.empty else pd.DataFrame()
-    latest_report_time = None
-
-    if not prog.empty:
-        prog["fecha_registro"] = pd.to_datetime(
-            prog.get("fecha_registro"),
-            errors="coerce",
-        )
-
-        if getattr(prog["fecha_registro"].dt, "tz", None) is not None:
-            prog["fecha_registro"] = prog["fecha_registro"].dt.tz_localize(None)
-
-        prog["avance"] = pd.to_numeric(
-            prog.get("avance"),
-            errors="coerce",
-        ).fillna(0).clip(0, 100)
-
-        prog = prog.dropna(
-            subset=["actividad_id", "fecha_registro"]
-        )
-
-        if not prog.empty:
-            latest_report_time = prog["fecha_registro"].max()
-
     # ---------------------------------------------------------------
-    # PUNTOS DE LA CURVA:
-    # Inicio exacto + cortes intermedios + fin exacto.
+    # Puntos temporales:
+    # inicio exacto + 4 cortes diarios + fin exacto.
     # ---------------------------------------------------------------
     cut_hours = (0, 7, 14, 19)
     cut_points = [schedule_start]
@@ -325,16 +303,11 @@ def build_s_curve(
     while current_day <= final_day:
         for hour in cut_hours:
             cutoff = current_day + pd.Timedelta(hours=hour)
-
-            # Solo cortes estrictamente posteriores al inicio y
-            # estrictamente anteriores al fin.
             if schedule_start < cutoff < schedule_finish:
                 cut_points.append(cutoff)
-
         current_day += pd.Timedelta(days=1)
 
     cut_points.append(schedule_finish)
-
     cut_points = sorted(
         pd.to_datetime(
             pd.Series(cut_points).drop_duplicates()
@@ -342,12 +315,12 @@ def build_s_curve(
     )
 
     # ---------------------------------------------------------------
-    # PLAN: promedio del avance temporal de todas las actividades.
+    # PLAN = promedio del avance esperado de todas las actividades.
     # ---------------------------------------------------------------
     plan_values = []
 
     for cutoff in cut_points:
-        total_planned_percentage = 0.0
+        planned_sum = 0.0
 
         for _, activity in valid.iterrows():
             activity_start = activity["inicio_plan"]
@@ -371,19 +344,44 @@ def build_s_curve(
                     else 100.0
                 )
 
-            total_planned_percentage += max(
+            planned_sum += max(
                 0.0,
                 min(100.0, activity_plan),
             )
 
         plan_values.append(
-            total_planned_percentage / total_activities
+            planned_sum / total_activities
         )
 
     # ---------------------------------------------------------------
-    # REAL: último reporte de cada actividad hasta cada punto.
-    # La línea REAL se muestra solo hasta donde existan reportes.
+    # REAL = promedio del último avance de todas las actividades.
     # ---------------------------------------------------------------
+    prog = progress.copy() if not progress.empty else pd.DataFrame()
+    latest_report_time = None
+
+    if not prog.empty:
+        prog["fecha_registro"] = pd.to_datetime(
+            prog.get("fecha_registro"),
+            errors="coerce",
+        )
+
+        if getattr(prog["fecha_registro"].dt, "tz", None) is not None:
+            prog["fecha_registro"] = (
+                prog["fecha_registro"].dt.tz_localize(None)
+            )
+
+        prog["avance"] = pd.to_numeric(
+            prog.get("avance"),
+            errors="coerce",
+        ).fillna(0).clip(0, 100)
+
+        prog = prog.dropna(
+            subset=["actividad_id", "fecha_registro"]
+        )
+
+        if not prog.empty:
+            latest_report_time = prog["fecha_registro"].max()
+
     activity_ids = valid["id"].tolist()
     real_values = []
 
@@ -394,6 +392,7 @@ def build_s_curve(
             )
             continue
 
+        # La curva real no se extiende a cortes futuros sin reporte.
         if latest_report_time is not None and cutoff > latest_report_time:
             real_values.append(None)
             continue
@@ -414,13 +413,13 @@ def build_s_curve(
             .to_dict()
         )
 
-        total_real_percentage = sum(
+        real_sum = sum(
             float(latest_per_activity.get(activity_id, 0.0))
             for activity_id in activity_ids
         )
 
         real_values.append(
-            total_real_percentage / total_activities
+            real_sum / total_activities
         )
 
     curve = pd.DataFrame({
@@ -437,8 +436,9 @@ def build_s_curve(
     )
 
     real_indexes = curve.index[curve["REAL"].notna()].tolist()
+
     if real_indexes:
-        real_series = (
+        curve.loc[real_indexes, "REAL"] = (
             pd.to_numeric(
                 curve.loc[real_indexes, "REAL"],
                 errors="coerce",
@@ -447,9 +447,8 @@ def build_s_curve(
             .clip(0, 100)
             .cummax()
         )
-        curve.loc[real_indexes, "REAL"] = real_series
 
-    # Garantizar extremos exactos del PLAN.
+    # Extremos exactos del PLAN.
     curve.loc[curve.index[0], "PLAN"] = 0.0
     curve.loc[curve.index[-1], "PLAN"] = 100.0
 
@@ -959,7 +958,7 @@ if page == "Dashboard ejecutivo":
         ]
 
         fig_curve.update_layout(
-            title="Curva S – Inicio, cortes operativos y fin planificado",
+            title="Curva S – Promedio de avance de actividades (Plan vs. Real)",
             xaxis_title="Fecha / corte operativo",
             yaxis_title="Avance acumulado (%)",
             yaxis_range=[0, 105],
@@ -983,11 +982,10 @@ if page == "Dashboard ejecutivo":
         st.plotly_chart(fig_curve, use_container_width=True)
 
         st.caption(
-            "La curva inicia en la fecha/hora exacta del primer inicio_plan, "
-            "mantiene cortes intermedios a las 00:00, 07:00, 14:00 y 19:00, "
-            "y termina en la fecha/hora exacta del último fin_plan. "
-            "El PLAN se calcula por cantidad de actividades y el REAL con los "
-            "avances registrados. No se utilizan HH ni proyección futura."
+            "PLAN = promedio del avance esperado de todas las actividades "
+            "según inicio_plan y fin_plan. REAL = promedio del último porcentaje "
+            "reportado de todas las actividades; las actividades sin reporte "
+            "se consideran en 0%. No se utilizan OTs, HH ni pesos."
         )
 
         left, right = st.columns([1.25, 1])
