@@ -2691,73 +2691,149 @@ if page == "Dashboard ejecutivo":
 # DETALLE POR OT
 # ============================================================
 if page == "Detalle por OT":
-    st.subheader(
-        "Detalle por OT"
-    )
+    st.subheader("Detalle por OT")
 
-    if ots.empty:
-        st.info(
-            "No existen OTs registradas."
-        )
+    if ots.empty or activities.empty:
+        st.info("No existen OTs o actividades registradas.")
 
     else:
-        selected_detail_ot = (
-            st.selectbox(
-                "Seleccione OT",
-                ots["ot"]
-                .astype(str)
-                .sort_values()
-                .tolist(),
-                index=None,
-                placeholder="Buscar OT...",
+        # --------------------------------------------------------
+        # FILTROS: SUPERVISOR + OT
+        # --------------------------------------------------------
+        supervisor_values = []
+
+        if "supervisor" in activities.columns:
+            supervisor_values = sorted(
+                [
+                    value
+                    for value in activities["supervisor"]
+                    .fillna("")
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                    if value.strip()
+                ]
+            )
+
+        supervisor_options = ["TODOS"] + supervisor_values
+
+        filter_supervisor_col, filter_ot_col = st.columns(2)
+
+        selected_detail_supervisor = (
+            filter_supervisor_col.selectbox(
+                "Seleccione supervisor",
+                supervisor_options,
+                index=0,
+                key="detail_supervisor_filter_final",
             )
         )
 
+        # --------------------------------------------------------
+        # OTs DISPONIBLES SEGÚN SUPERVISOR
+        # --------------------------------------------------------
+        if selected_detail_supervisor == "TODOS":
+            available_ots = ots.copy()
+
+        else:
+            supervisor_activities = activities[
+                activities["supervisor"]
+                .fillna("")
+                .astype(str)
+                == selected_detail_supervisor
+            ].copy()
+
+            supervisor_ot_ids = (
+                supervisor_activities["ot_id"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            available_ots = ots[
+                ots["id"].isin(supervisor_ot_ids)
+            ].copy()
+
+        ot_options = (
+            available_ots["ot"]
+            .astype(str)
+            .sort_values()
+            .tolist()
+        )
+
+        selected_detail_ot = (
+            filter_ot_col.selectbox(
+                "Seleccione OT",
+                ot_options,
+                index=None,
+                placeholder="Buscar OT...",
+                key="detail_ot_filter_final",
+            )
+        )
+
+        if selected_detail_supervisor == "TODOS":
+            st.caption(
+                f"Mostrando todas las OTs disponibles: "
+                f"{len(ot_options)} OT(s)."
+            )
+        else:
+            st.caption(
+                f"{len(ot_options)} OT(s) asignada(s) a "
+                f"{selected_detail_supervisor}."
+            )
+
+        # --------------------------------------------------------
+        # DETALLE SOLO CUANDO SELECCIONA OT
+        # --------------------------------------------------------
         if selected_detail_ot:
-            ot_row = ots[
-                ots["ot"].astype(str)
+            ot_row = available_ots[
+                available_ots["ot"].astype(str)
                 == selected_detail_ot
             ].iloc[0]
 
+            if selected_detail_supervisor != "TODOS":
+                st.write(
+                    f"**Supervisor:** {selected_detail_supervisor}"
+                )
+
             st.write(
-                f"**Equipo:** "
-                f"{ot_row.get('equipo', '')}"
+                f"**Equipo:** {ot_row.get('equipo', '')}"
             )
 
             st.write(
-                f"**Descripción:** "
-                f"{ot_row.get('descripcion', '')}"
+                f"**Descripción:** {ot_row.get('descripcion', '')}"
             )
 
-            detail_activities = (
-                activity_status[
-                    activity_status[
-                        "ot_id"
-                    ]
-                    == ot_row["id"]
-                ].copy()
-            )
+            detail_activities = activity_status[
+                activity_status["ot_id"]
+                == ot_row["id"]
+            ].copy()
+
+            # Si se selecciona supervisor específico, filtrar actividades.
+            if (
+                selected_detail_supervisor != "TODOS"
+                and "supervisor" in detail_activities.columns
+            ):
+                detail_activities = detail_activities[
+                    detail_activities["supervisor"]
+                    .fillna("")
+                    .astype(str)
+                    == selected_detail_supervisor
+                ]
 
             if detail_activities.empty:
                 st.info(
-                    "La OT no tiene actividades."
+                    "No existen actividades para los filtros seleccionados."
                 )
 
             else:
-                detail_activities[
-                    "avance_real"
-                ] = pd.to_numeric(
-                    detail_activities[
-                        "avance_real"
-                    ],
+                detail_activities["avance_real"] = pd.to_numeric(
+                    detail_activities["avance_real"],
                     errors="coerce",
                 ).fillna(0)
 
                 st.metric(
                     "Avance de la OT",
-                    (
-                        f"{weighted_progress(detail_activities):.1f}%"
-                    ),
+                    f"{weighted_progress(detail_activities):.1f}%",
                 )
 
                 detail_cols = [
@@ -2776,66 +2852,56 @@ if page == "Detalle por OT":
                 detail_cols = [
                     col
                     for col in detail_cols
-                    if col
-                    in detail_activities.columns
+                    if col in detail_activities.columns
                 ]
 
                 st.dataframe(
-                    detail_activities[
-                        detail_cols
-                    ],
+                    detail_activities[detail_cols],
                     use_container_width=True,
                     hide_index=True,
                 )
 
-                activity_ids = (
-                    detail_activities[
-                        "id"
-                    ].tolist()
-                )
+                # ------------------------------------------------
+                # HISTORIAL COHERENTE CON EL FILTRO ACTUAL
+                # ------------------------------------------------
+                activity_ids = detail_activities["id"].tolist()
 
                 if (
                     not progress.empty
-                    and "actividad_id"
-                    in progress.columns
+                    and "actividad_id" in progress.columns
                 ):
                     history = progress[
-                        progress[
-                            "actividad_id"
-                        ].isin(
-                            activity_ids
-                        )
+                        progress["actividad_id"].isin(activity_ids)
                     ].copy()
 
                     if not history.empty:
-                        activity_info = (
-                            activities[
-                                [
-                                    "id",
-                                    "codigo_actividad",
-                                    "descripcion",
-                                ]
-                            ]
-                        )
+                        activity_info_cols = [
+                            "id",
+                            "codigo_actividad",
+                            "descripcion",
+                        ]
+
+                        if "supervisor" in activities.columns:
+                            activity_info_cols.append("supervisor")
+
+                        activity_info = activities[
+                            activity_info_cols
+                        ].copy()
 
                         history = history.merge(
                             activity_info,
                             left_on="actividad_id",
                             right_on="id",
                             how="left",
-                            suffixes=(
-                                "",
-                                "_actividad",
-                            ),
+                            suffixes=("", "_actividad"),
                         )
 
-                        st.markdown(
-                            "### Historial de reportes"
-                        )
+                        st.markdown("### Historial de reportes")
 
                         history_cols = [
                             "fecha_registro",
                             "codigo_actividad",
+                            "supervisor",
                             "avance",
                             "descripcion_avance",
                             "observaciones",
@@ -2845,19 +2911,15 @@ if page == "Detalle por OT":
 
                         history_cols = [
                             col
-                            for col
-                            in history_cols
-                            if col
-                            in history.columns
+                            for col in history_cols
+                            if col in history.columns
                         ]
 
                         st.dataframe(
                             history.sort_values(
                                 "fecha_registro",
                                 ascending=False,
-                            )[
-                                history_cols
-                            ],
+                            )[history_cols],
                             use_container_width=True,
                             hide_index=True,
                         )
