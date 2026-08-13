@@ -2794,51 +2794,37 @@ if page == "Detalle por OT":
 # EVIDENCIAS
 # ============================================================
 if page == "Evidencias":
-    st.subheader(
-        "Galería de Evidencias"
-    )
+    st.subheader("Evidencias - Antapaccay")
 
     if (
         progress.empty
-        or "evidencias"
-        not in progress.columns
+        or "evidencias" not in progress.columns
     ):
-        st.info(
-            "No existen evidencias registradas."
-        )
+        st.info("No existen evidencias registradas.")
 
     else:
-        evidence_progress = (
-            progress.copy()
-        )
+        evidence_progress = progress.copy()
 
         def has_evidence(value):
             if isinstance(value, list):
                 return len(value) > 0
 
             if isinstance(value, str):
-                return bool(
-                    value.strip()
-                )
+                return bool(value.strip())
 
             return False
 
-        evidence_progress = (
-            evidence_progress[
-                evidence_progress[
-                    "evidencias"
-                ].apply(
-                    has_evidence
-                )
-            ]
-        )
+        evidence_progress = evidence_progress[
+            evidence_progress["evidencias"].apply(has_evidence)
+        ].copy()
 
         if evidence_progress.empty:
-            st.info(
-                "No existen evidencias registradas."
-            )
+            st.info("No existen evidencias registradas.")
 
         else:
+            # ----------------------------------------------------
+            # ENRIQUECER CON DATOS DE ACTIVIDAD Y OT
+            # ----------------------------------------------------
             activity_cols = [
                 col
                 for col in [
@@ -2846,26 +2832,19 @@ if page == "Evidencias":
                     "ot_id",
                     "codigo_actividad",
                     "descripcion",
+                    "supervisor",
+                    "especialidad",
+                    "grupo",
                 ]
-                if col
-                in activities.columns
+                if col in activities.columns
             ]
 
-            merged = (
-                evidence_progress.merge(
-                    activities[
-                        activity_cols
-                    ],
-                    left_on=(
-                        "actividad_id"
-                    ),
-                    right_on="id",
-                    how="left",
-                    suffixes=(
-                        "",
-                        "_actividad",
-                    ),
-                )
+            merged = evidence_progress.merge(
+                activities[activity_cols],
+                left_on="actividad_id",
+                right_on="id",
+                how="left",
+                suffixes=("", "_actividad"),
             )
 
             ot_cols = [
@@ -2875,8 +2854,7 @@ if page == "Evidencias":
                     "ot",
                     "equipo",
                 ]
-                if col
-                in ots.columns
+                if col in ots.columns
             ]
 
             merged = merged.merge(
@@ -2884,165 +2862,330 @@ if page == "Evidencias":
                 left_on="ot_id",
                 right_on="id",
                 how="left",
-                suffixes=(
-                    "",
-                    "_ot",
-                ),
+                suffixes=("", "_ot"),
             )
+
+            if "ot" not in merged.columns:
+                merged["ot"] = ""
+
+            if "codigo_actividad" not in merged.columns:
+                merged["codigo_actividad"] = ""
+
+            if "tipo_evidencia" not in merged.columns:
+                merged["tipo_evidencia"] = ""
+
+            merged["ot"] = (
+                merged["ot"]
+                .fillna("")
+                .astype(str)
+            )
+
+            merged["codigo_actividad"] = (
+                merged["codigo_actividad"]
+                .fillna("")
+                .astype(str)
+            )
+
+            merged["tipo_evidencia"] = (
+                merged["tipo_evidencia"]
+                .fillna("")
+                .astype(str)
+                .str.upper()
+            )
+
+            # Limpiar OTs que puedan venir como 123456.0
+            def clean_ot_label(value):
+                value = str(value).strip()
+
+                if value.endswith(".0"):
+                    try:
+                        return str(int(float(value)))
+                    except Exception:
+                        pass
+
+                return value
+
+            merged["ot"] = merged["ot"].apply(clean_ot_label)
+
+            # ----------------------------------------------------
+            # FILTROS SUPERIORES
+            # ----------------------------------------------------
+            filter_ot_col, filter_type_col = st.columns(2)
 
             ot_options = (
                 ["TODAS"]
                 + sorted(
-                    merged["ot"]
+                    [
+                        value
+                        for value in merged["ot"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                        if value.strip()
+                    ]
+                )
+            )
+
+            evidence_types = sorted(
+                [
+                    value
+                    for value in merged["tipo_evidencia"]
+                    .dropna()
                     .astype(str)
                     .unique()
                     .tolist()
-                )
+                    if value.strip()
+                ]
             )
 
-            selected_ot = (
-                st.selectbox(
-                    "Filtrar por OT",
-                    ot_options,
-                )
+            type_options = ["TODAS"] + evidence_types
+
+            selected_ot = filter_ot_col.selectbox(
+                "Filtrar por OT",
+                ot_options,
+                key="evidence_filter_ot",
             )
+
+            selected_type = filter_type_col.selectbox(
+                "Tipo de evidencia",
+                type_options,
+                key="evidence_filter_type",
+            )
+
+            filtered_evidence = merged.copy()
 
             if selected_ot != "TODAS":
-                merged = merged[
-                    merged["ot"]
-                    .astype(str)
-                    == selected_ot
+                filtered_evidence = filtered_evidence[
+                    filtered_evidence["ot"] == selected_ot
                 ]
 
-            for _, row in (
-                merged.sort_values(
+            if selected_type != "TODAS":
+                filtered_evidence = filtered_evidence[
+                    filtered_evidence["tipo_evidencia"] == selected_type
+                ]
+
+            # Orden más reciente primero
+            if "fecha_registro" in filtered_evidence.columns:
+                filtered_evidence = filtered_evidence.sort_values(
                     "fecha_registro",
                     ascending=False,
                 )
-                .iterrows()
+
+            st.caption(
+                f"{len(filtered_evidence)} registro(s) con evidencia."
+            )
+
+            st.write("")
+
+            # ----------------------------------------------------
+            # REGISTROS DESPLEGABLES
+            # ----------------------------------------------------
+            for row_index, (_, row) in enumerate(
+                filtered_evidence.iterrows()
             ):
-                st.markdown(
-                    f"### OT {row.get('ot', '')} · "
-                    f"{row.get('codigo_actividad', '')} · "
-                    f"{int(float(row.get('avance', 0) or 0))}%"
+                ot_label = clean_ot_label(
+                    row.get("ot", "")
                 )
 
-                st.write(
+                activity_label = str(
                     row.get(
-                        "descripcion_actividad",
+                        "codigo_actividad",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                try:
+                    progress_value = float(
+                        row.get("avance", 0)
+                        or 0
+                    )
+                except Exception:
+                    progress_value = 0.0
+
+                if abs(progress_value - round(progress_value)) < 0.0001:
+                    progress_text = f"{int(round(progress_value))}%"
+                else:
+                    progress_text = f"{progress_value:.1f}%"
+
+                expander_title = (
+                    f"OT {ot_label} · "
+                    f"{activity_label} · "
+                    f"{progress_text}"
+                )
+
+                with st.expander(
+                    expander_title,
+                    expanded=False,
+                ):
+                    # --------------------------------------------
+                    # INFORMACIÓN PRINCIPAL
+                    # --------------------------------------------
+                    c1, c2, c3, c4 = st.columns(4)
+
+                    c1.write(
+                        "**OT**  \n"
+                        f"{ot_label}"
+                    )
+
+                    c2.write(
+                        "**Actividad**  \n"
+                        f"{activity_label}"
+                    )
+
+                    c3.write(
+                        "**Avance**  \n"
+                        f"{progress_text}"
+                    )
+
+                    c4.write(
+                        "**Tipo de evidencia**  \n"
+                        f"{row.get('tipo_evidencia', '') or '-'}"
+                    )
+
+                    description_text = str(
                         row.get(
-                            "descripcion",
-                            "",
-                        ),
-                    )
-                )
-
-                fecha_txt = ""
-
-                if pd.notna(
-                    row.get(
-                        "fecha_registro"
-                    )
-                ):
-                    fecha_txt = (
-                        pd.to_datetime(
-                            row[
-                                "fecha_registro"
-                            ]
-                        )
-                        .strftime(
-                            "%d/%m/%Y %H:%M"
-                        )
-                    )
-
-                etapa_txt = str(
-                    row.get(
-                        "tipo_evidencia",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                usuario_txt = str(
-                    row.get(
-                        "usuario",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                details = " · ".join(
-                    item
-                    for item in [
-                        (
-                            f"Etapa: "
-                            f"{etapa_txt}"
-                            if etapa_txt
-                            else ""
-                        ),
-                        (
-                            f"Usuario: "
-                            f"{usuario_txt}"
-                            if usuario_txt
-                            else ""
-                        ),
-                        fecha_txt,
-                    ]
-                    if item
-                )
-
-                st.caption(details)
-
-                urls = (
-                    row.get(
-                        "evidencias"
-                    )
-                    or []
-                )
-
-                if isinstance(
-                    urls,
-                    str,
-                ):
-                    urls = [urls]
-
-                if urls:
-                    cols = st.columns(
-                        min(
-                            3,
-                            len(urls),
-                        )
-                    )
-
-                    for index, url in enumerate(
-                        urls
-                    ):
-                        cols[
-                            index
-                            % len(cols)
-                        ].image(
-                            url,
-                            use_container_width=True,
-                        )
-
-                if str(
-                    row.get(
-                        "observaciones",
-                        "",
-                    )
-                    or ""
-                ).strip():
-                    st.info(
-                        "Observación / Restricción: "
-                        + str(
+                            "descripcion_actividad",
                             row.get(
-                                "observaciones",
+                                "descripcion",
                                 "",
-                            )
+                            ),
                         )
+                        or ""
+                    ).strip()
+
+                    if description_text:
+                        st.write(
+                            f"**Descripción de actividad:** "
+                            f"{description_text}"
+                        )
+
+                    # --------------------------------------------
+                    # DETALLE DEL REPORTE
+                    # --------------------------------------------
+                    detail_col1, detail_col2, detail_col3 = st.columns(3)
+
+                    supervisor_text = str(
+                        row.get(
+                            "supervisor",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    user_text = str(
+                        row.get(
+                            "usuario",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    date_text = ""
+
+                    if pd.notna(
+                        row.get("fecha_registro")
+                    ):
+                        try:
+                            date_text = pd.to_datetime(
+                                row["fecha_registro"]
+                            ).strftime(
+                                "%d/%m/%Y %H:%M"
+                            )
+                        except Exception:
+                            date_text = str(
+                                row.get(
+                                    "fecha_registro",
+                                    "",
+                                )
+                            )
+
+                    detail_col1.write(
+                        "**Supervisor**  \n"
+                        f"{supervisor_text or '-'}"
                     )
 
-                st.markdown("---")
+                    detail_col2.write(
+                        "**Usuario que registró**  \n"
+                        f"{user_text or '-'}"
+                    )
+
+                    detail_col3.write(
+                        "**Fecha / hora**  \n"
+                        f"{date_text or '-'}"
+                    )
+
+                    advance_description = str(
+                        row.get(
+                            "descripcion_avance",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    if advance_description:
+                        st.write(
+                            "**Descripción del avance:**"
+                        )
+                        st.write(
+                            advance_description
+                        )
+
+                    observations_text = str(
+                        row.get(
+                            "observaciones",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    if observations_text:
+                        st.info(
+                            "Observaciones / Restricciones: "
+                            + observations_text
+                        )
+
+                    # --------------------------------------------
+                    # GALERÍA DE FOTOS
+                    # --------------------------------------------
+                    urls = (
+                        row.get("evidencias")
+                        or []
+                    )
+
+                    if isinstance(urls, str):
+                        urls = [urls]
+
+                    urls = [
+                        url
+                        for url in urls
+                        if str(url).strip()
+                    ]
+
+                    if urls:
+                        st.markdown(
+                            "**Evidencias fotográficas**"
+                        )
+
+                        image_columns = st.columns(
+                            min(3, len(urls))
+                        )
+
+                        for image_index, url in enumerate(
+                            urls
+                        ):
+                            image_columns[
+                                image_index
+                                % len(image_columns)
+                            ].image(
+                                url,
+                                use_container_width=True,
+                            )
+                    else:
+                        st.caption(
+                            "Este registro no contiene fotografías disponibles."
+                        )
 
 
 # ============================================================
