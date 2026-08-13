@@ -270,7 +270,8 @@ def compress_evidence_image(
         ) from exc
 
 
-def upload_evidence(file, ot: str, activity_id: str) -> str:
+def upload_evidence(file, ot: str, activity_id: str) -> dict:
+    original_bytes = file.getvalue()
     compressed_bytes, ext, content_type = compress_evidence_image(file)
 
     safe_ot = "".join(
@@ -295,7 +296,11 @@ def upload_evidence(file, ot: str, activity_id: str) -> str:
         },
     )
 
-    return supabase.storage.from_(BUCKET).get_public_url(path)
+    return {
+        "url": supabase.storage.from_(BUCKET).get_public_url(path),
+        "original_size": len(original_bytes),
+        "compressed_size": len(compressed_bytes),
+    }
 
 
 # ============================================================
@@ -1445,6 +1450,12 @@ if page == "Registrar avance":
         "Registrar avance"
     )
 
+    # Mensaje persistente después del rerun.
+    if st.session_state.get("advance_saved_message"):
+        st.success(
+            st.session_state.pop("advance_saved_message")
+        )
+
     if ots.empty or activities.empty:
         st.warning(
             "Primero debe registrar o importar OTs y actividades."
@@ -1774,11 +1785,13 @@ if page == "Registrar avance":
                         else:
                             try:
                                 evidence_urls = []
+                                total_original_bytes = 0
+                                total_compressed_bytes = 0
 
                                 for photo in (
                                     photos or []
                                 ):
-                                    url = upload_evidence(
+                                    upload_result = upload_evidence(
                                         photo,
                                         str(
                                             selected_ot
@@ -1787,8 +1800,17 @@ if page == "Registrar avance":
                                             activity_id
                                         ),
                                     )
+
                                     evidence_urls.append(
-                                        url
+                                        upload_result["url"]
+                                    )
+
+                                    total_original_bytes += int(
+                                        upload_result["original_size"]
+                                    )
+
+                                    total_compressed_bytes += int(
+                                        upload_result["compressed_size"]
                                     )
 
                                 payload = {
@@ -1841,9 +1863,53 @@ if page == "Registrar avance":
 
                                 invalidate()
 
-                                st.success(
-                                    "Avance y evidencias registrados correctamente."
+                                photo_count = len(
+                                    photos or []
                                 )
+
+                                if photo_count > 0:
+                                    original_mb = (
+                                        total_original_bytes
+                                        / 1024
+                                        / 1024
+                                    )
+                                    compressed_mb = (
+                                        total_compressed_bytes
+                                        / 1024
+                                        / 1024
+                                    )
+
+                                    if total_original_bytes > 0:
+                                        reduction_pct = max(
+                                            0.0,
+                                            (
+                                                1
+                                                - (
+                                                    total_compressed_bytes
+                                                    / total_original_bytes
+                                                )
+                                            )
+                                            * 100,
+                                        )
+                                    else:
+                                        reduction_pct = 0.0
+
+                                    success_message = (
+                                        f"✅ Avance guardado correctamente. "
+                                        f"📷 {photo_count} evidencia(s) cargada(s) y comprimida(s). "
+                                        f"Tamaño: {original_mb:.2f} MB → "
+                                        f"{compressed_mb:.2f} MB "
+                                        f"({reduction_pct:.0f}% de reducción)."
+                                    )
+                                else:
+                                    success_message = (
+                                        "✅ Avance guardado correctamente. "
+                                        "No se adjuntaron evidencias fotográficas."
+                                    )
+
+                                st.session_state[
+                                    "advance_saved_message"
+                                ] = success_message
 
                                 st.rerun()
 
