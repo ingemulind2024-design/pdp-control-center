@@ -2139,18 +2139,32 @@ if page == "Dashboard ejecutivo":
                     text="Avance",
                 )
 
+                # Mostrar únicamente el porcentaje al final de cada barra.
                 fig_ot.update_traces(
                     texttemplate="%{text:.1f}%",
                     textposition="outside",
                     cliponaxis=False,
+                    hovertemplate=(
+                        "OT: %{y}<br>"
+                        "Avance: %{x:.1f}%"
+                        "<extra></extra>"
+                    ),
                 )
 
+                # Eje vertical = SOLO OT.
+                # Eje horizontal = porcentaje de avance.
                 fig_ot.update_layout(
                     xaxis_title="Avance (%)",
                     yaxis_title="",
                     xaxis=dict(
                         range=[0, 105],
-                        ticksuffix="%",
+                        tickmode="array",
+                        tickvals=[0, 20, 40, 60, 80, 100],
+                        ticktext=["0", "20", "40", "60", "80", "100"],
+                    ),
+                    yaxis=dict(
+                        type="category",
+                        automargin=True,
                     ),
                     height=max(
                         430,
@@ -2159,7 +2173,7 @@ if page == "Dashboard ejecutivo":
                     showlegend=False,
                     margin=dict(
                         l=20,
-                        r=90,
+                        r=95,
                         t=15,
                         b=55,
                     ),
