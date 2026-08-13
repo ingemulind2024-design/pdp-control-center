@@ -1450,39 +1450,104 @@ if page == "Registrar avance":
         "Registrar avance"
     )
 
-
     if ots.empty or activities.empty:
         st.warning(
             "Primero debe registrar o importar OTs y actividades."
         )
 
     else:
+        # --------------------------------------------------------
+        # FILTRO 1: SUPERVISOR
+        # --------------------------------------------------------
+        supervisor_values = []
+
+        if "supervisor" in activities.columns:
+            supervisor_values = sorted(
+                [
+                    value
+                    for value in activities["supervisor"]
+                    .fillna("")
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                    if value.strip()
+                ]
+            )
+
+        supervisor_options = ["TODOS"] + supervisor_values
+
+        filter_supervisor_col, filter_ot_col = st.columns(2)
+
+        selected_register_supervisor = (
+            filter_supervisor_col.selectbox(
+                "Seleccione supervisor",
+                supervisor_options,
+                index=0,
+                key="register_supervisor_filter",
+            )
+        )
+
+        # --------------------------------------------------------
+        # FILTRO 2: OTs SEGÚN SUPERVISOR
+        # --------------------------------------------------------
         active_ots = ots.copy()
 
         if "activo" in active_ots.columns:
             active_ots = active_ots[
-                active_ots["activo"].fillna(
-                    True
-                )
+                active_ots["activo"].fillna(True)
             ]
 
+        if selected_register_supervisor == "TODOS":
+            available_ots = active_ots.copy()
+
+        else:
+            supervisor_activities = activities[
+                activities["supervisor"]
+                .fillna("")
+                .astype(str)
+                == selected_register_supervisor
+            ].copy()
+
+            supervisor_ot_ids = (
+                supervisor_activities["ot_id"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            available_ots = active_ots[
+                active_ots["id"].isin(supervisor_ot_ids)
+            ].copy()
+
         ot_options = (
-            active_ots["ot"]
+            available_ots["ot"]
             .astype(str)
             .sort_values()
             .tolist()
         )
 
-        selected_ot = st.selectbox(
+        selected_ot = filter_ot_col.selectbox(
             "Escriba o seleccione la OT *",
             ot_options,
             index=None,
             placeholder="Buscar OT...",
+            key="register_ot_filter",
         )
 
+        if selected_register_supervisor == "TODOS":
+            st.caption(
+                f"Mostrando todas las OTs disponibles: "
+                f"{len(ot_options)} OT(s)."
+            )
+        else:
+            st.caption(
+                f"{len(ot_options)} OT(s) asignada(s) a "
+                f"{selected_register_supervisor}."
+            )
+
         if selected_ot:
-            ot_info = active_ots[
-                active_ots["ot"].astype(str)
+            ot_info = available_ots[
+                available_ots["ot"].astype(str)
                 == selected_ot
             ].iloc[0]
 
@@ -1491,9 +1556,21 @@ if page == "Registrar avance":
                 == ot_info["id"]
             ].copy()
 
+            # Si hay supervisor específico, filtrar también actividades.
+            if (
+                selected_register_supervisor != "TODOS"
+                and "supervisor" in ot_activities.columns
+            ):
+                ot_activities = ot_activities[
+                    ot_activities["supervisor"]
+                    .fillna("")
+                    .astype(str)
+                    == selected_register_supervisor
+                ]
+
             if ot_activities.empty:
                 st.warning(
-                    "La OT seleccionada no tiene actividades registradas."
+                    "La OT seleccionada no tiene actividades para el filtro actual."
                 )
 
             else:
@@ -1545,6 +1622,7 @@ if page == "Registrar avance":
                         placeholder=(
                             "Buscar actividad..."
                         ),
+                        key="register_activity_filter",
                     )
                 )
 
@@ -1814,8 +1892,6 @@ if page == "Registrar avance":
                                             activity_id
                                         )
                                     ),
-                                    # Supabase almacena avance como INTEGER.
-                                    # Evita enviar valores tipo 5.0, 20.0, etc.
                                     "avance": int(
                                         round(
                                             float(advance)
@@ -1914,13 +1990,11 @@ if page == "Registrar avance":
                                     f"{exc}"
                                 )
 
-
-    # Confirmación persistente debajo de GUARDAR AVANCE.
-    if st.session_state.get("advance_saved_message"):
-        st.success(
-            st.session_state.pop("advance_saved_message")
-        )
-
+                    # Confirmación debajo del botón GUARDAR AVANCE.
+                    if st.session_state.get("advance_saved_message"):
+                        st.success(
+                            st.session_state.pop("advance_saved_message")
+                        )
 
 
 # ============================================================
