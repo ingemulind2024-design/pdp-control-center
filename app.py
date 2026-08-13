@@ -1797,8 +1797,12 @@ if page == "Registrar avance":
                                             activity_id
                                         )
                                     ),
-                                    "avance": float(
-                                        advance
+                                    # Supabase almacena avance como INTEGER.
+                                    # Evita enviar valores tipo 5.0, 20.0, etc.
+                                    "avance": int(
+                                        round(
+                                            float(advance)
+                                        )
                                     ),
                                     "descripcion_avance": (
                                         str(
