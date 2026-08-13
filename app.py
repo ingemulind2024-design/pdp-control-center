@@ -1450,11 +1450,6 @@ if page == "Registrar avance":
         "Registrar avance"
     )
 
-    # Mensaje persistente después del rerun.
-    if st.session_state.get("advance_saved_message"):
-        st.success(
-            st.session_state.pop("advance_saved_message")
-        )
 
     if ots.empty or activities.empty:
         st.warning(
@@ -1918,6 +1913,14 @@ if page == "Registrar avance":
                                     "No fue posible registrar el avance: "
                                     f"{exc}"
                                 )
+
+
+    # Confirmación persistente debajo de GUARDAR AVANCE.
+    if st.session_state.get("advance_saved_message"):
+        st.success(
+            st.session_state.pop("advance_saved_message")
+        )
+
 
 
 # ============================================================
