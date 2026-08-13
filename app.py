@@ -2104,19 +2104,17 @@ if page == "Dashboard ejecutivo":
                     group["ot"].iloc[0]
                 ).strip()
 
-                equipment_name = str(
-                    group["equipo"].iloc[0]
-                ).strip()
-
-                ot_label = (
-                    f"{ot_name} - {equipment_name}"
-                    if equipment_name
-                    else ot_name
-                )
+                # Mostrar únicamente la OT en el eje vertical.
+                # También limpia valores tipo "1175904.0" si vienen desde Excel.
+                if ot_name.endswith(".0"):
+                    try:
+                        ot_name = str(int(float(ot_name)))
+                    except Exception:
+                        pass
 
                 ot_rows.append(
                     {
-                        "OT": ot_label,
+                        "OT": ot_name,
                         "Avance": weighted_progress(group),
                     }
                 )
@@ -4158,4 +4156,3 @@ if page == "Exportar reporte":
             ),
             use_container_width=True,
         )
-    
