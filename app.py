@@ -407,19 +407,13 @@ def build_s_curve(
     progress: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    PLAN:
-    promedio simple del avance esperado de todas las actividades,
-    según inicio_plan y fin_plan.
-
-    REAL:
-    último porcentaje reportado por actividad hasta cada corte.
-    Las actividades sin reporte se consideran 0%.
-
-    Cortes:
-    00:00, 07:00, 14:00 y 19:00, más inicio y fin exactos.
+    Curva S Antapaccay con configuración tipo Chinalco:
+    - cortes oficiales 00:00 / 07:00 / 14:00 / 19:00
+    - punto EN VIVO para PLAN y REAL
+    - inicio y fin exactos
     """
     empty_curve = pd.DataFrame(
-        columns=["fecha", "PLAN", "REAL"]
+        columns=["fecha", "PLAN", "REAL", "tipo_punto"]
     )
 
     if activities.empty:
@@ -431,33 +425,15 @@ def build_s_curve(
         return empty_curve
 
     acts["inicio_plan"] = pd.to_datetime(
-        acts["inicio_plan"],
-        errors="coerce",
+        acts["inicio_plan"], errors="coerce"
     )
     acts["fin_plan"] = pd.to_datetime(
-        acts["fin_plan"],
-        errors="coerce",
+        acts["fin_plan"], errors="coerce"
     )
 
     for column in ["inicio_plan", "fin_plan"]:
         if getattr(acts[column].dt, "tz", None) is not None:
             acts[column] = acts[column].dt.tz_localize(None)
-
-    acts["inicio_plan"] = acts["inicio_plan"].fillna(
-        acts["fin_plan"]
-    )
-    acts["fin_plan"] = acts["fin_plan"].fillna(
-        acts["inicio_plan"]
-    )
-
-    invalid_duration = (
-        acts["fin_plan"] <= acts["inicio_plan"]
-    )
-
-    acts.loc[invalid_duration, "fin_plan"] = (
-        acts.loc[invalid_duration, "inicio_plan"]
-        + pd.Timedelta(minutes=1)
-    )
 
     valid = acts.dropna(
         subset=["id", "inicio_plan", "fin_plan"]
@@ -466,97 +442,102 @@ def build_s_curve(
     if valid.empty:
         return empty_curve
 
-    total_activities = len(valid)
+    invalid = valid["fin_plan"] <= valid["inicio_plan"]
+    valid.loc[invalid, "fin_plan"] = (
+        valid.loc[invalid, "inicio_plan"]
+        + pd.Timedelta(minutes=1)
+    )
 
     schedule_start = valid["inicio_plan"].min()
     schedule_finish = valid["fin_plan"].max()
+    total_activities = len(valid)
 
-    if pd.isna(schedule_start) or pd.isna(schedule_finish):
-        return empty_curve
+    now_live = pd.Timestamp.now(
+        tz=LIMA_TZ
+    ).tz_localize(None)
 
-    cut_points = [schedule_start]
+    points = [
+        {"fecha": schedule_start, "tipo_punto": "INICIO"}
+    ]
 
-    current_day = schedule_start.normalize()
-    final_day = schedule_finish.normalize()
+    day = schedule_start.normalize()
+    last_day = schedule_finish.normalize()
 
-    while current_day <= final_day:
+    while day <= last_day:
         for hour in CUT_HOURS:
-            cutoff = current_day + pd.Timedelta(hours=hour)
+            cutoff = day + pd.Timedelta(hours=hour)
             if schedule_start < cutoff < schedule_finish:
-                cut_points.append(cutoff)
+                points.append(
+                    {"fecha": cutoff, "tipo_punto": "CORTE"}
+                )
+        day += pd.Timedelta(days=1)
 
-        current_day += pd.Timedelta(days=1)
+    if schedule_start < now_live < schedule_finish:
+        points.append(
+            {"fecha": now_live, "tipo_punto": "EN VIVO"}
+        )
 
-    cut_points.append(schedule_finish)
-
-    cut_points = sorted(
-        pd.to_datetime(
-            pd.Series(cut_points).drop_duplicates()
-        ).tolist()
+    points.append(
+        {"fecha": schedule_finish, "tipo_punto": "FIN"}
     )
 
-    # --------------------------------------------------------
+    points_df = pd.DataFrame(points)
+    points_df["fecha"] = pd.to_datetime(points_df["fecha"])
+    points_df["priority"] = points_df["tipo_punto"].map(
+        {"EN VIVO": 4, "INICIO": 3, "FIN": 3, "CORTE": 1}
+    ).fillna(0)
+
+    points_df = (
+        points_df.sort_values(
+            ["fecha", "priority"],
+            ascending=[True, False],
+        )
+        .drop_duplicates(subset=["fecha"], keep="first")
+        .sort_values("fecha")
+        .reset_index(drop=True)
+    )
+
     # PLAN
-    # --------------------------------------------------------
     plan_values = []
 
-    for cutoff in cut_points:
-        planned_sum = 0.0
+    for cutoff in points_df["fecha"]:
+        total_plan = 0.0
 
         for _, activity in valid.iterrows():
-            activity_start = activity["inicio_plan"]
-            activity_finish = activity["fin_plan"]
+            start_plan = activity["inicio_plan"]
+            finish_plan = activity["fin_plan"]
 
-            if cutoff <= activity_start:
-                activity_plan = 0.0
-
-            elif cutoff >= activity_finish:
-                activity_plan = 100.0
-
+            if cutoff <= start_plan:
+                value = 0.0
+            elif cutoff >= finish_plan:
+                value = 100.0
             else:
-                duration_seconds = (
-                    activity_finish - activity_start
+                duration = (
+                    finish_plan - start_plan
+                ).total_seconds()
+                elapsed = (
+                    cutoff - start_plan
                 ).total_seconds()
 
-                elapsed_seconds = (
-                    cutoff - activity_start
-                ).total_seconds()
-
-                activity_plan = (
-                    elapsed_seconds
-                    / duration_seconds
-                    * 100.0
-                    if duration_seconds > 0
+                value = (
+                    elapsed / duration * 100.0
+                    if duration > 0
                     else 100.0
                 )
 
-            planned_sum += max(
-                0.0,
-                min(100.0, activity_plan),
-            )
+            total_plan += max(0.0, min(100.0, value))
 
         plan_values.append(
-            planned_sum / total_activities
+            total_plan / total_activities
         )
 
-    # --------------------------------------------------------
     # REAL
-    # --------------------------------------------------------
-    prog = (
-        progress.copy()
-        if not progress.empty
-        else pd.DataFrame()
-    )
+    prog = progress.copy() if not progress.empty else pd.DataFrame()
 
-    latest_report_time = None
+    required = {"actividad_id", "avance", "fecha_registro"}
 
-    if not prog.empty:
-        if (
-            "fecha_registro" not in prog.columns
-            or "actividad_id" not in prog.columns
-            or "avance" not in prog.columns
-        ):
-            prog = pd.DataFrame()
+    if not prog.empty and not required.issubset(prog.columns):
+        prog = pd.DataFrame()
 
     if not prog.empty:
         prog["fecha_registro"] = pd.to_datetime(
@@ -564,15 +545,18 @@ def build_s_curve(
             errors="coerce",
         )
 
-        if getattr(
-            prog["fecha_registro"].dt,
-            "tz",
-            None,
-        ) is not None:
-            prog["fecha_registro"] = (
-                prog["fecha_registro"]
-                .dt.tz_localize(None)
-            )
+        if getattr(prog["fecha_registro"].dt, "tz", None) is not None:
+            try:
+                prog["fecha_registro"] = (
+                    prog["fecha_registro"]
+                    .dt.tz_convert(LIMA_TZ)
+                    .dt.tz_localize(None)
+                )
+            except Exception:
+                prog["fecha_registro"] = (
+                    prog["fecha_registro"]
+                    .dt.tz_localize(None)
+                )
 
         prog["avance"] = pd.to_numeric(
             prog["avance"],
@@ -580,35 +564,22 @@ def build_s_curve(
         ).fillna(0).clip(0, 100)
 
         prog = prog.dropna(
-            subset=[
-                "actividad_id",
-                "fecha_registro",
-            ]
+            subset=["actividad_id", "fecha_registro"]
         )
-
-        if not prog.empty:
-            latest_report_time = (
-                prog["fecha_registro"].max()
-            )
 
     activity_ids = valid["id"].tolist()
     real_values = []
 
-    for cutoff in cut_points:
-        if prog.empty:
-            real_values.append(
-                0.0
-                if cutoff == schedule_start
-                else None
-            )
+    for _, point in points_df.iterrows():
+        cutoff = point["fecha"]
+        point_type = point["tipo_punto"]
+
+        if cutoff > now_live and point_type != "EN VIVO":
+            real_values.append(None)
             continue
 
-        # No extender REAL a cortes futuros sin reporte.
-        if (
-            latest_report_time is not None
-            and cutoff > latest_report_time
-        ):
-            real_values.append(None)
+        if prog.empty:
+            real_values.append(0.0)
             continue
 
         available = prog[
@@ -619,7 +590,7 @@ def build_s_curve(
             real_values.append(0.0)
             continue
 
-        latest_per_activity = (
+        latest = (
             available
             .sort_values("fecha_registro")
             .groupby("actividad_id", as_index=False)
@@ -628,54 +599,28 @@ def build_s_curve(
             .to_dict()
         )
 
-        real_sum = sum(
-            float(
-                latest_per_activity.get(
-                    activity_id,
-                    0.0,
-                )
-            )
+        real_total = sum(
+            float(latest.get(activity_id, 0.0))
             for activity_id in activity_ids
         )
 
         real_values.append(
-            real_sum / total_activities
+            real_total / total_activities
         )
 
-    curve = pd.DataFrame(
-        {
-            "fecha": pd.to_datetime(cut_points),
-            "PLAN": plan_values,
-            "REAL": real_values,
-        }
-    )
-
+    curve = points_df[["fecha", "tipo_punto"]].copy()
     curve["PLAN"] = (
-        pd.to_numeric(
-            curve["PLAN"],
-            errors="coerce",
-        )
-        .fillna(0)
+        pd.Series(plan_values)
         .clip(0, 100)
         .cummax()
     )
+    curve["REAL"] = real_values
 
-    real_indexes = (
-        curve.index[
-            curve["REAL"].notna()
-        ].tolist()
-    )
-
-    if real_indexes:
-        curve.loc[
-            real_indexes,
-            "REAL",
-        ] = (
+    real_mask = curve["REAL"].notna()
+    if real_mask.any():
+        curve.loc[real_mask, "REAL"] = (
             pd.to_numeric(
-                curve.loc[
-                    real_indexes,
-                    "REAL",
-                ],
+                curve.loc[real_mask, "REAL"],
                 errors="coerce",
             )
             .fillna(0)
@@ -683,24 +628,10 @@ def build_s_curve(
             .cummax()
         )
 
-    # Extremos del plan.
     curve.loc[curve.index[0], "PLAN"] = 0.0
     curve.loc[curve.index[-1], "PLAN"] = 100.0
 
-    if pd.isna(
-        curve.loc[
-            curve.index[0],
-            "REAL",
-        ]
-    ):
-        curve.loc[
-            curve.index[0],
-            "REAL",
-        ] = 0.0
-
     return curve
-
-
 def render_s_curve(curve: pd.DataFrame):
     if curve.empty:
         st.info(
@@ -716,13 +647,24 @@ def render_s_curve(curve: pd.DataFrame):
             y=curve["PLAN"],
             mode="lines+markers+text",
             name="PLAN",
-            line=dict(width=4, shape="spline", smoothing=0.9),
+            line=dict(
+                width=4,
+                shape="spline",
+                smoothing=0.8,
+            ),
             marker=dict(size=7),
             text=[
                 f"{value:.1f}%"
                 for value in curve["PLAN"]
             ],
             textposition="top center",
+            customdata=curve["tipo_punto"],
+            hovertemplate=(
+                "%{x|%d/%m/%Y %H:%M}<br>"
+                "PLAN: %{y:.1f}%<br>"
+                "Punto: %{customdata}"
+                "<extra></extra>"
+            ),
         )
     )
 
@@ -740,7 +682,7 @@ def render_s_curve(curve: pd.DataFrame):
                 line=dict(
                     width=4,
                     shape="spline",
-                    smoothing=0.9,
+                    smoothing=0.8,
                 ),
                 marker=dict(size=8),
                 text=[
@@ -748,44 +690,125 @@ def render_s_curve(curve: pd.DataFrame):
                     for value in real_curve["REAL"]
                 ],
                 textposition="bottom center",
+                customdata=real_curve["tipo_punto"],
+                hovertemplate=(
+                    "%{x|%d/%m/%Y %H:%M}<br>"
+                    "REAL: %{y:.1f}%<br>"
+                    "Punto: %{customdata}"
+                    "<extra></extra>"
+                ),
             )
         )
 
+    live = curve[
+        curve["tipo_punto"] == "EN VIVO"
+    ]
+
+    if not live.empty:
+        live_row = live.iloc[0]
+
+        fig.add_trace(
+            go.Scatter(
+                x=[live_row["fecha"]],
+                y=[live_row["PLAN"]],
+                mode="markers+text",
+                marker=dict(
+                    size=15,
+                    symbol="circle",
+                    line=dict(width=2),
+                ),
+                text=[
+                    f"EN VIVO<br>{live_row['PLAN']:.1f}%"
+                ],
+                textposition="top center",
+                showlegend=False,
+                hovertemplate=(
+                    "%{x|%d/%m/%Y %H:%M}<br>"
+                    "PLAN EN VIVO: %{y:.1f}%"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        if pd.notna(live_row["REAL"]):
+            fig.add_trace(
+                go.Scatter(
+                    x=[live_row["fecha"]],
+                    y=[live_row["REAL"]],
+                    mode="markers+text",
+                    marker=dict(
+                        size=15,
+                        symbol="circle",
+                        line=dict(width=2),
+                    ),
+                    text=[
+                        f"EN VIVO<br>{live_row['REAL']:.1f}%"
+                    ],
+                    textposition="bottom center",
+                    showlegend=False,
+                    hovertemplate=(
+                        "%{x|%d/%m/%Y %H:%M}<br>"
+                        "REAL EN VIVO: %{y:.1f}%"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+        fig.add_vline(
+            x=live_row["fecha"],
+            line_width=1,
+            line_dash="dot",
+            annotation_text="AHORA",
+            annotation_position="top",
+        )
+
+    tick_points = curve[
+        curve["tipo_punto"].isin(
+            ["INICIO", "CORTE", "EN VIVO", "FIN"]
+        )
+    ]
+
+    tick_values = tick_points["fecha"].tolist()
+    tick_text = []
+
+    for _, row in tick_points.iterrows():
+        label = pd.to_datetime(
+            row["fecha"]
+        ).strftime("%d/%m<br>%H:%M")
+
+        if row["tipo_punto"] == "EN VIVO":
+            label += "<br><b>EN VIVO</b>"
+
+        tick_text.append(label)
+
     fig.update_layout(
-        title="Curva S - Avance Plan vs Real",
-        xaxis_title="Fecha / Hora",
-        yaxis_title="Avance acumulado (%)",
+        title="Curva S consolidada - Plan vs Real",
+        xaxis_title="Fecha / hora",
+        yaxis_title="Acumulado (%)",
         yaxis=dict(
             range=[0, 108],
             ticksuffix="%",
         ),
+        xaxis=dict(
+            tickmode="array",
+            tickvals=tick_values,
+            ticktext=tick_text,
+        ),
         hovermode="x unified",
-        height=520,
+        height=540,
         legend=dict(
             orientation="h",
             yanchor="bottom",
             y=1.02,
-            xanchor="right",
-            x=1,
+            xanchor="center",
+            x=0.5,
         ),
         margin=dict(
             l=20,
             r=20,
-            t=75,
-            b=20,
+            t=80,
+            b=90,
         ),
-    )
-
-    fig.update_xaxes(
-        tickformat="%d/%m %H:%M",
-    )
-
-    fig.update_traces(
-        hovertemplate=(
-            "%{x|%d/%m/%Y %H:%M}<br>"
-            "Avance: %{y:.2f}%"
-            "<extra>%{fullData.name}</extra>"
-        )
     )
 
     st.plotly_chart(
@@ -793,12 +816,6 @@ def render_s_curve(curve: pd.DataFrame):
         use_container_width=True,
     )
 
-    st.caption(
-        "PLAN = promedio del avance esperado según inicio_plan y fin_plan. "
-        "REAL = promedio del último porcentaje reportado de todas las "
-        "actividades hasta cada corte; actividades sin reporte = 0%. "
-        "Cortes: 00:00, 07:00, 14:00 y 19:00."
-    )
 
 
 # ============================================================
