@@ -275,8 +275,17 @@ def upload_evidence(
     file,
     ot: str,
     activity_id: str,
-    max_retries: int = 3,
+    max_retries: int = 2,
 ) -> dict:
+    """
+    Carga robusta de evidencia.
+
+    Prioridad:
+    1. Cliente admin/service_role para evitar bloqueos RLS de Storage.
+    2. Cliente normal como fallback si no existe service_role.
+
+    Devuelve el error real si la carga falla.
+    """
     original_bytes = file.getvalue()
     compressed_bytes, ext, content_type = compress_evidence_image(file)
 
@@ -287,41 +296,60 @@ def upload_evidence(
 
     filename = (
         f"{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_"
-        f"{uuid.uuid4().hex[:10]}.{ext}"
+        f"{uuid.uuid4().hex[:12]}.{ext}"
     )
 
     path = f"{safe_ot}/{activity_id}/{filename}"
+
+    # Para Storage usar service_role si está disponible.
+    storage_client = (
+        supabase_admin
+        if supabase_admin is not None
+        else supabase
+    )
+
     last_error = None
 
     for attempt in range(1, max_retries + 1):
         try:
-            supabase.storage.from_(BUCKET).upload(
+            storage_client.storage.from_(BUCKET).upload(
                 path=path,
                 file=compressed_bytes,
                 file_options={
-                    "content-type": content_type,
-                    "upsert": "false",
                     "cache-control": "3600",
+                    "upsert": "false",
+                    "content-type": content_type,
                 },
             )
 
+            # URL pública. Si el bucket es privado, este URL no servirá
+            # para visualizar; la carga sí puede haber sido exitosa.
+            public_url = storage_client.storage.from_(
+                BUCKET
+            ).get_public_url(path)
+
             return {
-                "url": supabase.storage.from_(BUCKET).get_public_url(path),
+                "url": public_url,
+                "path": path,
                 "original_size": len(original_bytes),
                 "compressed_size": len(compressed_bytes),
                 "attempts": attempt,
                 "filename": getattr(file, "name", "evidencia"),
+                "used_admin": supabase_admin is not None,
             }
 
         except Exception as exc:
             last_error = exc
 
             if attempt < max_retries:
-                time.sleep(1.2 * attempt)
+                time.sleep(1.5 * attempt)
 
     raise RuntimeError(
-        f"No se pudo cargar '{getattr(file, 'name', 'evidencia')}' "
-        f"después de {max_retries} intentos: {last_error}"
+        "FALLO_STORAGE | "
+        f"archivo={getattr(file, 'name', 'evidencia')} | "
+        f"bucket={BUCKET} | "
+        f"service_role={'SI' if supabase_admin is not None else 'NO'} | "
+        f"error={last_error}"
     )
 
 
@@ -2064,13 +2092,16 @@ if page == "Registrar avance":
                                             )
                                         )
 
-                                    except Exception:
+                                    except Exception as photo_exc:
                                         failed_photos.append(
-                                            getattr(
-                                                photo,
-                                                "name",
-                                                "evidencia",
-                                            )
+                                            {
+                                                "name": getattr(
+                                                    photo,
+                                                    "name",
+                                                    "evidencia",
+                                                ),
+                                                "error": str(photo_exc),
+                                            }
                                         )
 
                                 payload = {
@@ -2181,11 +2212,23 @@ if page == "Registrar avance":
                                     )
 
                                 if failed_photos:
+                                    failed_names = [
+                                        item["name"]
+                                        for item in failed_photos
+                                    ]
+
                                     success_message += (
                                         " ⚠️ No cargaron: "
-                                        + ", ".join(failed_photos)
+                                        + ", ".join(failed_names)
                                         + "."
                                     )
+
+                                    st.session_state[
+                                        "last_storage_errors"
+                                    ] = [
+                                        item["error"]
+                                        for item in failed_photos
+                                    ]
 
                                 st.session_state[
                                     "advance_saved_message"
@@ -2204,6 +2247,18 @@ if page == "Registrar avance":
                         st.success(
                             st.session_state.pop("advance_saved_message")
                         )
+
+                    if st.session_state.get("last_storage_errors"):
+                        with st.expander(
+                            "Ver detalle técnico de fotos que no cargaron"
+                        ):
+                            for storage_error in st.session_state.pop(
+                                "last_storage_errors"
+                            ):
+                                st.code(
+                                    storage_error,
+                                    language="text",
+                                )
 
 
 # ============================================================
