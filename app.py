@@ -599,13 +599,45 @@ def build_s_curve(
             .to_dict()
         )
 
-        real_total = sum(
-            float(latest.get(activity_id, 0.0))
-            for activity_id in activity_ids
+        # REAL usa la misma fórmula ponderada del KPI Avance general.
+        weighted_sum = 0.0
+        weight_sum = 0.0
+
+        for _, activity in valid.iterrows():
+            activity_id = activity["id"]
+
+            try:
+                activity_weight = float(
+                    activity.get("peso", 1.0)
+                )
+            except Exception:
+                activity_weight = 1.0
+
+            if pd.isna(activity_weight):
+                activity_weight = 1.0
+
+            activity_real = float(
+                latest.get(
+                    activity_id,
+                    0.0,
+                )
+            )
+
+            weighted_sum += (
+                activity_real
+                * activity_weight
+            )
+
+            weight_sum += activity_weight
+
+        real_value = (
+            weighted_sum / weight_sum
+            if weight_sum > 0
+            else 0.0
         )
 
         real_values.append(
-            real_total / total_activities
+            real_value
         )
 
     curve = points_df[["fecha", "tipo_punto"]].copy()
@@ -630,6 +662,27 @@ def build_s_curve(
 
     curve.loc[curve.index[0], "PLAN"] = 0.0
     curve.loc[curve.index[-1], "PLAN"] = 100.0
+
+    # En el punto EN VIVO, REAL debe coincidir exactamente con
+    # el KPI "Avance general" del Dashboard.
+    live_indexes = curve.index[
+        curve["tipo_punto"] == "EN VIVO"
+    ].tolist()
+
+    if live_indexes:
+        current_status = build_activity_status(
+            activities,
+            progress,
+        )
+
+        current_general_progress = weighted_progress(
+            current_status
+        )
+
+        curve.loc[
+            live_indexes[0],
+            "REAL",
+        ] = current_general_progress
 
     return curve
 def render_s_curve(curve: pd.DataFrame):
