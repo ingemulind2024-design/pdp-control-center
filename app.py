@@ -713,12 +713,12 @@ def render_s_curve(curve: pd.DataFrame):
                 y=[live_row["PLAN"]],
                 mode="markers+text",
                 marker=dict(
-                    size=15,
+                    size=7,
                     symbol="circle",
-                    line=dict(width=2),
+                    line=dict(width=1),
                 ),
                 text=[
-                    f"EN VIVO<br>{live_row['PLAN']:.1f}%"
+                    f"{live_row['PLAN']:.1f}%"
                 ],
                 textposition="top center",
                 showlegend=False,
@@ -737,12 +737,12 @@ def render_s_curve(curve: pd.DataFrame):
                     y=[live_row["REAL"]],
                     mode="markers+text",
                     marker=dict(
-                        size=15,
+                        size=7,
                         symbol="circle",
-                        line=dict(width=2),
+                        line=dict(width=1),
                     ),
                     text=[
-                        f"EN VIVO<br>{live_row['REAL']:.1f}%"
+                        f"{live_row['REAL']:.1f}%"
                     ],
                     textposition="bottom center",
                     showlegend=False,
@@ -775,9 +775,6 @@ def render_s_curve(curve: pd.DataFrame):
         label = pd.to_datetime(
             row["fecha"]
         ).strftime("%d/%m<br>%H:%M")
-
-        if row["tipo_punto"] == "EN VIVO":
-            label += "<br><b>EN VIVO</b>"
 
         tick_text.append(label)
 
