@@ -1,5 +1,6 @@
 import io
 import hmac
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -218,8 +219,8 @@ def load_model():
 # ============================================================
 def compress_evidence_image(
     uploaded_file,
-    max_side: int = 1600,
-    quality: int = 82,
+    max_side: int = 1280,
+    quality: int = 78,
 ) -> tuple[bytes, str, str]:
     """
     Comprime la evidencia antes de almacenarla.
@@ -270,7 +271,12 @@ def compress_evidence_image(
         ) from exc
 
 
-def upload_evidence(file, ot: str, activity_id: str) -> dict:
+def upload_evidence(
+    file,
+    ot: str,
+    activity_id: str,
+    max_retries: int = 3,
+) -> dict:
     original_bytes = file.getvalue()
     compressed_bytes, ext, content_type = compress_evidence_image(file)
 
@@ -285,22 +291,38 @@ def upload_evidence(file, ot: str, activity_id: str) -> dict:
     )
 
     path = f"{safe_ot}/{activity_id}/{filename}"
+    last_error = None
 
-    supabase.storage.from_(BUCKET).upload(
-        path=path,
-        file=compressed_bytes,
-        file_options={
-            "content-type": content_type,
-            "upsert": "false",
-            "cache-control": "3600",
-        },
+    for attempt in range(1, max_retries + 1):
+        try:
+            supabase.storage.from_(BUCKET).upload(
+                path=path,
+                file=compressed_bytes,
+                file_options={
+                    "content-type": content_type,
+                    "upsert": "false",
+                    "cache-control": "3600",
+                },
+            )
+
+            return {
+                "url": supabase.storage.from_(BUCKET).get_public_url(path),
+                "original_size": len(original_bytes),
+                "compressed_size": len(compressed_bytes),
+                "attempts": attempt,
+                "filename": getattr(file, "name", "evidencia"),
+            }
+
+        except Exception as exc:
+            last_error = exc
+
+            if attempt < max_retries:
+                time.sleep(1.2 * attempt)
+
+    raise RuntimeError(
+        f"No se pudo cargar '{getattr(file, 'name', 'evidencia')}' "
+        f"después de {max_retries} intentos: {last_error}"
     )
-
-    return {
-        "url": supabase.storage.from_(BUCKET).get_public_url(path),
-        "original_size": len(original_bytes),
-        "compressed_size": len(compressed_bytes),
-    }
 
 
 # ============================================================
@@ -2005,31 +2027,51 @@ if page == "Registrar avance":
                                 evidence_urls = []
                                 total_original_bytes = 0
                                 total_compressed_bytes = 0
+                                failed_photos = []
+                                total_upload_attempts = 0
 
                                 for photo in (
                                     photos or []
                                 ):
-                                    upload_result = upload_evidence(
-                                        photo,
-                                        str(
-                                            selected_ot
-                                        ),
-                                        str(
-                                            activity_id
-                                        ),
-                                    )
+                                    try:
+                                        upload_result = upload_evidence(
+                                            photo,
+                                            str(
+                                                selected_ot
+                                            ),
+                                            str(
+                                                activity_id
+                                            ),
+                                            max_retries=3,
+                                        )
 
-                                    evidence_urls.append(
-                                        upload_result["url"]
-                                    )
+                                        evidence_urls.append(
+                                            upload_result["url"]
+                                        )
 
-                                    total_original_bytes += int(
-                                        upload_result["original_size"]
-                                    )
+                                        total_original_bytes += int(
+                                            upload_result["original_size"]
+                                        )
 
-                                    total_compressed_bytes += int(
-                                        upload_result["compressed_size"]
-                                    )
+                                        total_compressed_bytes += int(
+                                            upload_result["compressed_size"]
+                                        )
+
+                                        total_upload_attempts += int(
+                                            upload_result.get(
+                                                "attempts",
+                                                1,
+                                            )
+                                        )
+
+                                    except Exception:
+                                        failed_photos.append(
+                                            getattr(
+                                                photo,
+                                                "name",
+                                                "evidencia",
+                                            )
+                                        )
 
                                 payload = {
                                     "actividad_id": (
@@ -2079,11 +2121,14 @@ if page == "Registrar avance":
 
                                 invalidate()
 
-                                photo_count = len(
+                                requested_photo_count = len(
                                     photos or []
                                 )
+                                uploaded_photo_count = len(
+                                    evidence_urls
+                                )
 
-                                if photo_count > 0:
+                                if uploaded_photo_count > 0:
                                     original_mb = (
                                         total_original_bytes
                                         / 1024
@@ -2095,32 +2140,51 @@ if page == "Registrar avance":
                                         / 1024
                                     )
 
-                                    if total_original_bytes > 0:
-                                        reduction_pct = max(
-                                            0.0,
-                                            (
-                                                1
-                                                - (
-                                                    total_compressed_bytes
-                                                    / total_original_bytes
-                                                )
+                                    reduction_pct = (
+                                        (
+                                            1
+                                            - (
+                                                total_compressed_bytes
+                                                / total_original_bytes
                                             )
-                                            * 100,
                                         )
-                                    else:
-                                        reduction_pct = 0.0
+                                        * 100
+                                        if total_original_bytes > 0
+                                        else 0.0
+                                    )
 
                                     success_message = (
                                         f"✅ Avance guardado correctamente. "
-                                        f"📷 {photo_count} evidencia(s) cargada(s) y comprimida(s). "
+                                        f"📷 {uploaded_photo_count} de "
+                                        f"{requested_photo_count} evidencia(s) cargada(s). "
                                         f"Tamaño: {original_mb:.2f} MB → "
                                         f"{compressed_mb:.2f} MB "
                                         f"({reduction_pct:.0f}% de reducción)."
                                     )
+
+                                    if total_upload_attempts > uploaded_photo_count:
+                                        success_message += (
+                                            " Se aplicaron reintentos automáticos."
+                                        )
+
+                                elif requested_photo_count > 0:
+                                    success_message = (
+                                        "✅ Avance guardado correctamente, pero "
+                                        "⚠️ ninguna evidencia pudo cargarse. "
+                                        "Vuelva a intentar las fotografías."
+                                    )
+
                                 else:
                                     success_message = (
                                         "✅ Avance guardado correctamente. "
                                         "No se adjuntaron evidencias fotográficas."
+                                    )
+
+                                if failed_photos:
+                                    success_message += (
+                                        " ⚠️ No cargaron: "
+                                        + ", ".join(failed_photos)
+                                        + "."
                                     )
 
                                 st.session_state[
