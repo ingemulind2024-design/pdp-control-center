@@ -407,156 +407,207 @@ def build_s_curve(
     progress: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Curva S Antapaccay con configuración tipo Chinalco:
-    - cortes oficiales 00:00 / 07:00 / 14:00 / 19:00
-    - punto EN VIVO para PLAN y REAL
-    - inicio y fin exactos
-    """
-    empty_curve = pd.DataFrame(
-        columns=["fecha", "PLAN", "REAL", "tipo_punto"]
-    )
+    Lógica idéntica a Chinalco, adaptada a Antapaccay.
 
+    - PLAN = promedio simple del avance esperado de TODAS las actividades.
+    - REAL = promedio simple del último avance de TODAS las actividades.
+    - Actividades sin reporte = 0%.
+    - Cortes oficiales = 00:00 / 07:00 / 14:00 / 19:00.
+    - Se agrega punto EN VIVO con hora actual.
+    - REAL se mantiene hasta AHORA y no se proyecta al futuro.
+    """
     if activities.empty:
-        return empty_curve
+        return pd.DataFrame(
+            columns=["fecha", "PLAN", "REAL", "tipo_punto"]
+        )
 
     acts = activities.copy()
 
-    if "inicio_plan" not in acts.columns or "fin_plan" not in acts.columns:
-        return empty_curve
-
     acts["inicio_plan"] = pd.to_datetime(
-        acts["inicio_plan"], errors="coerce"
+        acts["inicio_plan"],
+        errors="coerce",
     )
     acts["fin_plan"] = pd.to_datetime(
-        acts["fin_plan"], errors="coerce"
+        acts["fin_plan"],
+        errors="coerce",
     )
 
-    for column in ["inicio_plan", "fin_plan"]:
-        if getattr(acts[column].dt, "tz", None) is not None:
-            acts[column] = acts[column].dt.tz_localize(None)
+    for col in ["inicio_plan", "fin_plan"]:
+        if getattr(acts[col].dt, "tz", None) is not None:
+            acts[col] = acts[col].dt.tz_localize(None)
 
     valid = acts.dropna(
-        subset=["id", "inicio_plan", "fin_plan"]
+        subset=[
+            "id",
+            "inicio_plan",
+            "fin_plan",
+        ]
     ).copy()
 
     if valid.empty:
-        return empty_curve
+        return pd.DataFrame(
+            columns=["fecha", "PLAN", "REAL", "tipo_punto"]
+        )
 
-    invalid = valid["fin_plan"] <= valid["inicio_plan"]
-    valid.loc[invalid, "fin_plan"] = (
-        valid.loc[invalid, "inicio_plan"]
+    invalidas = (
+        valid["fin_plan"]
+        <= valid["inicio_plan"]
+    )
+
+    valid.loc[
+        invalidas,
+        "fin_plan",
+    ] = (
+        valid.loc[
+            invalidas,
+            "inicio_plan",
+        ]
         + pd.Timedelta(minutes=1)
     )
 
-    schedule_start = valid["inicio_plan"].min()
-    schedule_finish = valid["fin_plan"].max()
-    total_activities = len(valid)
+    inicio_programa = valid["inicio_plan"].min()
+    fin_programa = valid["fin_plan"].max()
 
-    now_live = pd.Timestamp.now(
-        tz=LIMA_TZ
-    ).tz_localize(None)
+    # ------------------------------------------------------------
+    # CORTES OFICIALES
+    # ------------------------------------------------------------
+    cortes = [inicio_programa]
+    tipos = ["INICIO"]
 
-    points = [
-        {"fecha": schedule_start, "tipo_punto": "INICIO"}
-    ]
+    dia = inicio_programa.normalize()
+    dia_final = fin_programa.normalize()
 
-    day = schedule_start.normalize()
-    last_day = schedule_finish.normalize()
+    horas_corte = [0, 7, 14, 19]
 
-    while day <= last_day:
-        for hour in CUT_HOURS:
-            cutoff = day + pd.Timedelta(hours=hour)
-            if schedule_start < cutoff < schedule_finish:
-                points.append(
-                    {"fecha": cutoff, "tipo_punto": "CORTE"}
-                )
-        day += pd.Timedelta(days=1)
+    while dia <= dia_final:
+        for hora in horas_corte:
+            corte = dia + pd.Timedelta(hours=hora)
 
-    if schedule_start < now_live < schedule_finish:
-        points.append(
-            {"fecha": now_live, "tipo_punto": "EN VIVO"}
+            if (
+                inicio_programa
+                < corte
+                < fin_programa
+            ):
+                cortes.append(corte)
+                tipos.append("CORTE")
+
+        dia += pd.Timedelta(days=1)
+
+    cortes.append(fin_programa)
+    tipos.append("FIN")
+
+    # ------------------------------------------------------------
+    # PUNTO EN VIVO
+    # ------------------------------------------------------------
+    ahora_lima = (
+        pd.Timestamp.now(
+            tz="America/Lima"
         )
-
-    points.append(
-        {"fecha": schedule_finish, "tipo_punto": "FIN"}
+        .tz_localize(None)
     )
 
-    points_df = pd.DataFrame(points)
-    points_df["fecha"] = pd.to_datetime(points_df["fecha"])
-    points_df["priority"] = points_df["tipo_punto"].map(
-        {"EN VIVO": 4, "INICIO": 3, "FIN": 3, "CORTE": 1}
+    if (
+        inicio_programa
+        < ahora_lima
+        < fin_programa
+    ):
+        cortes.append(ahora_lima)
+        tipos.append("EN VIVO")
+
+    puntos = pd.DataFrame(
+        {
+            "fecha": cortes,
+            "tipo_punto": tipos,
+        }
+    )
+
+    puntos["priority"] = puntos[
+        "tipo_punto"
+    ].map(
+        {
+            "EN VIVO": 4,
+            "INICIO": 3,
+            "FIN": 3,
+            "CORTE": 1,
+        }
     ).fillna(0)
 
-    points_df = (
-        points_df.sort_values(
+    puntos = (
+        puntos
+        .sort_values(
             ["fecha", "priority"],
             ascending=[True, False],
         )
-        .drop_duplicates(subset=["fecha"], keep="first")
+        .drop_duplicates(
+            subset=["fecha"],
+            keep="first",
+        )
         .sort_values("fecha")
         .reset_index(drop=True)
     )
 
-    # PLAN
+    total_actividades = len(valid)
+
+    # ------------------------------------------------------------
+    # PLAN - PROMEDIO SIMPLE
+    # ------------------------------------------------------------
     plan_values = []
 
-    for cutoff in points_df["fecha"]:
-        total_plan = 0.0
+    for corte in puntos["fecha"]:
+        suma_plan = 0.0
 
-        for _, activity in valid.iterrows():
-            start_plan = activity["inicio_plan"]
-            finish_plan = activity["fin_plan"]
+        for _, actividad in valid.iterrows():
+            inicio_act = actividad["inicio_plan"]
+            fin_act = actividad["fin_plan"]
 
-            if cutoff <= start_plan:
-                value = 0.0
-            elif cutoff >= finish_plan:
-                value = 100.0
+            if corte <= inicio_act:
+                avance = 0.0
+
+            elif corte >= fin_act:
+                avance = 100.0
+
             else:
-                duration = (
-                    finish_plan - start_plan
-                ).total_seconds()
-                elapsed = (
-                    cutoff - start_plan
+                duracion = (
+                    fin_act - inicio_act
                 ).total_seconds()
 
-                value = (
-                    elapsed / duration * 100.0
-                    if duration > 0
-                    else 100.0
+                transcurrido = (
+                    corte - inicio_act
+                ).total_seconds()
+
+                avance = (
+                    transcurrido
+                    / duracion
+                    * 100
+                    if duracion > 0
+                    else 100
                 )
 
-            total_plan += max(0.0, min(100.0, value))
+            suma_plan += max(
+                0,
+                min(100, avance),
+            )
 
         plan_values.append(
-            total_plan / total_activities
+            suma_plan
+            / total_actividades
         )
 
-    # REAL
-    prog = progress.copy() if not progress.empty else pd.DataFrame()
-
-    required = {"actividad_id", "avance", "fecha_registro"}
-
-    if not prog.empty and not required.issubset(prog.columns):
-        prog = pd.DataFrame()
+    # ------------------------------------------------------------
+    # REAL - PROMEDIO SIMPLE, IGUAL A CHINALCO
+    # ------------------------------------------------------------
+    prog = progress.copy()
 
     if not prog.empty:
-        prog["fecha_registro"] = pd.to_datetime(
-            prog["fecha_registro"],
-            errors="coerce",
+        prog["fecha_registro"] = (
+            pd.to_datetime(
+                prog["fecha_registro"],
+                errors="coerce",
+                utc=True,
+            )
+            .dt.tz_convert("America/Lima")
+            .dt.tz_localize(None)
         )
-
-        if getattr(prog["fecha_registro"].dt, "tz", None) is not None:
-            try:
-                prog["fecha_registro"] = (
-                    prog["fecha_registro"]
-                    .dt.tz_convert(LIMA_TZ)
-                    .dt.tz_localize(None)
-                )
-            except Exception:
-                prog["fecha_registro"] = (
-                    prog["fecha_registro"]
-                    .dt.tz_localize(None)
-                )
 
         prog["avance"] = pd.to_numeric(
             prog["avance"],
@@ -564,95 +615,107 @@ def build_s_curve(
         ).fillna(0).clip(0, 100)
 
         prog = prog.dropna(
-            subset=["actividad_id", "fecha_registro"]
+            subset=[
+                "actividad_id",
+                "fecha_registro",
+            ]
         )
 
-    activity_ids = valid["id"].tolist()
     real_values = []
+    ids_actividades = valid["id"].tolist()
 
-    for _, point in points_df.iterrows():
-        cutoff = point["fecha"]
-        point_type = point["tipo_punto"]
+    for corte in puntos["fecha"]:
+        if prog.empty:
+            real_values.append(
+                0.0
+                if corte <= ahora_lima
+                else None
+            )
+            continue
 
-        if cutoff > now_live and point_type != "EN VIVO":
+        # Solo ocultar puntos realmente futuros.
+        if corte > ahora_lima:
             real_values.append(None)
             continue
 
-        if prog.empty:
-            real_values.append(0.0)
-            continue
-
-        available = prog[
-            prog["fecha_registro"] <= cutoff
+        disponibles = prog[
+            prog["fecha_registro"] <= corte
         ]
 
-        if available.empty:
+        if disponibles.empty:
             real_values.append(0.0)
             continue
 
-        latest = (
-            available
+        ultimos = (
+            disponibles
             .sort_values("fecha_registro")
-            .groupby("actividad_id", as_index=False)
+            .groupby(
+                "actividad_id",
+                as_index=False,
+            )
             .tail(1)
-            .set_index("actividad_id")["avance"]
+            .set_index("actividad_id")[
+                "avance"
+            ]
             .to_dict()
         )
 
-        # REAL usa la misma fórmula ponderada del KPI Avance general.
-        weighted_sum = 0.0
-        weight_sum = 0.0
-
-        for _, activity in valid.iterrows():
-            activity_id = activity["id"]
-
-            try:
-                activity_weight = float(
-                    activity.get("peso", 1.0)
-                )
-            except Exception:
-                activity_weight = 1.0
-
-            if pd.isna(activity_weight):
-                activity_weight = 1.0
-
-            activity_real = float(
-                latest.get(
-                    activity_id,
-                    0.0,
+        suma_real = sum(
+            float(
+                ultimos.get(
+                    actividad_id,
+                    0,
                 )
             )
-
-            weighted_sum += (
-                activity_real
-                * activity_weight
-            )
-
-            weight_sum += activity_weight
-
-        real_value = (
-            weighted_sum / weight_sum
-            if weight_sum > 0
-            else 0.0
+            for actividad_id
+            in ids_actividades
         )
 
         real_values.append(
-            real_value
+            suma_real
+            / total_actividades
         )
 
-    curve = points_df[["fecha", "tipo_punto"]].copy()
-    curve["PLAN"] = (
-        pd.Series(plan_values)
+    curva = pd.DataFrame(
+        {
+            "fecha": pd.to_datetime(
+                puntos["fecha"]
+            ),
+            "PLAN": plan_values,
+            "REAL": real_values,
+            "tipo_punto": puntos[
+                "tipo_punto"
+            ].tolist(),
+        }
+    )
+
+    curva["PLAN"] = (
+        pd.to_numeric(
+            curva["PLAN"],
+            errors="coerce",
+        )
+        .fillna(0)
         .clip(0, 100)
         .cummax()
     )
-    curve["REAL"] = real_values
 
-    real_mask = curve["REAL"].notna()
-    if real_mask.any():
-        curve.loc[real_mask, "REAL"] = (
+    indices_real = (
+        curva.index[
+            curva["REAL"].notna()
+        ]
+        .tolist()
+    )
+
+    if indices_real:
+        curva.loc[
+            indices_real,
+            "REAL",
+        ] = (
             pd.to_numeric(
-                curve.loc[real_mask, "REAL"],
+                curva.loc[
+                    indices_real,
+                    "REAL",
+                ],
                 errors="coerce",
             )
             .fillna(0)
@@ -660,31 +723,28 @@ def build_s_curve(
             .cummax()
         )
 
-    curve.loc[curve.index[0], "PLAN"] = 0.0
-    curve.loc[curve.index[-1], "PLAN"] = 100.0
+    curva.loc[
+        curva.index[0],
+        "PLAN",
+    ] = 0.0
 
-    # En el punto EN VIVO, REAL debe coincidir exactamente con
-    # el KPI "Avance general" del Dashboard.
-    live_indexes = curve.index[
-        curve["tipo_punto"] == "EN VIVO"
-    ].tolist()
+    curva.loc[
+        curva.index[-1],
+        "PLAN",
+    ] = 100.0
 
-    if live_indexes:
-        current_status = build_activity_status(
-            activities,
-            progress,
-        )
-
-        current_general_progress = weighted_progress(
-            current_status
-        )
-
-        curve.loc[
-            live_indexes[0],
+    if pd.isna(
+        curva.loc[
+            curva.index[0],
             "REAL",
-        ] = current_general_progress
+        ]
+    ):
+        curva.loc[
+            curva.index[0],
+            "REAL",
+        ] = 0.0
 
-    return curve
+    return curva
 def render_s_curve(curve: pd.DataFrame):
     if curve.empty:
         st.info(
@@ -875,6 +935,11 @@ def compute_kpis(
     activities: pd.DataFrame,
     progress: pd.DataFrame,
 ) -> dict:
+    """
+    KPI con la misma metodología de Chinalco:
+    Avance general = promedio simple del último avance de
+    TODAS las actividades.
+    """
     status = build_activity_status(
         activities,
         progress,
@@ -891,21 +956,35 @@ def compute_kpis(
             "hh_ganadas": 0.0,
         }
 
-    avance_general = weighted_progress(status)
+    avance_general = float(
+        status["avance_real"].mean()
+    ) if not status.empty else 0.0
 
     culminadas = int(
-        (status["avance_real"] >= 100).sum()
+        (
+            status["avance_real"]
+            >= 100
+        ).sum()
     )
 
     parciales = int(
         (
-            (status["avance_real"] > 0)
-            & (status["avance_real"] < 100)
+            (
+                status["avance_real"]
+                > 0
+            )
+            & (
+                status["avance_real"]
+                < 100
+            )
         ).sum()
     )
 
     no_iniciadas = int(
-        (status["avance_real"] <= 0).sum()
+        (
+            status["avance_real"]
+            <= 0
+        ).sum()
     )
 
     if "hh_plan" in status.columns:
@@ -915,12 +994,13 @@ def compute_kpis(
         ).fillna(0)
     else:
         hh_plan_series = pd.Series(
-            0,
+            0.0,
             index=status.index,
-            dtype=float,
         )
 
-    hh_plan = float(hh_plan_series.sum())
+    hh_plan = float(
+        hh_plan_series.sum()
+    )
 
     hh_ganadas = float(
         (
@@ -939,8 +1019,6 @@ def compute_kpis(
         "hh_plan": hh_plan,
         "hh_ganadas": hh_ganadas,
     }
-
-
 def get_current_plan(curve: pd.DataFrame) -> float:
     if curve.empty:
         return 0.0
