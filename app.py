@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pandas as pd
+import requests
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
@@ -13,6 +14,8 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import (
+    Image as RLImage,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -1523,6 +1526,979 @@ def build_pdf_report(
     return buffer.getvalue()
 
 
+
+# ============================================================
+# INFORME PDF POR OT / ACTIVIDAD
+# ============================================================
+def _safe_report_text(value, default="-") -> str:
+    if value is None:
+        return default
+
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+
+    value = str(value).strip()
+    return value if value else default
+
+
+def _fmt_number(value, decimals=0, default="-") -> str:
+    try:
+        number = float(value)
+        if pd.isna(number):
+            return default
+
+        if decimals == 0:
+            return f"{number:.0f}"
+
+        return f"{number:.{decimals}f}"
+    except Exception:
+        return default
+
+
+def _download_report_image(url: str) -> io.BytesIO | None:
+    """
+    Descarga una evidencia para insertarla dentro del PDF.
+    Si la URL falla, el reporte continúa sin bloquearse.
+    """
+    if not url:
+        return None
+
+    try:
+        response = requests.get(
+            str(url),
+            timeout=15,
+        )
+        response.raise_for_status()
+
+        content_type = (
+            response.headers.get(
+                "content-type",
+                "",
+            )
+            .lower()
+        )
+
+        if (
+            "image" not in content_type
+            and not response.content
+        ):
+            return None
+
+        return io.BytesIO(
+            response.content
+        )
+
+    except Exception:
+        return None
+
+
+def _evidence_stage_urls(
+    activity_id,
+    progress: pd.DataFrame,
+) -> dict:
+    """
+    Devuelve como máximo una fotografía representativa
+    por etapa: INICIO / DURANTE / FINAL.
+
+    Prioriza el registro más reciente de cada etapa.
+    """
+    stages = {
+        "INICIO": None,
+        "DURANTE": None,
+        "FINAL": None,
+    }
+
+    if progress.empty:
+        return stages
+
+    activity_progress = progress[
+        progress["actividad_id"]
+        == activity_id
+    ].copy()
+
+    if activity_progress.empty:
+        return stages
+
+    if "fecha_registro" in activity_progress.columns:
+        activity_progress = (
+            activity_progress.sort_values(
+                "fecha_registro",
+                ascending=False,
+            )
+        )
+
+    for _, row in activity_progress.iterrows():
+        stage = str(
+            row.get(
+                "tipo_evidencia",
+                "",
+            )
+            or ""
+        ).strip().upper()
+
+        # Compatibilidad con registros anteriores.
+        stage_map = {
+            "ANTES": "INICIO",
+            "INICIO": "INICIO",
+            "DURANTE": "DURANTE",
+            "DESPUÉS": "FINAL",
+            "DESPUES": "FINAL",
+            "FINAL": "FINAL",
+        }
+
+        stage = stage_map.get(
+            stage,
+            stage,
+        )
+
+        if stage not in stages:
+            continue
+
+        if stages[stage] is not None:
+            continue
+
+        urls = row.get(
+            "evidencias",
+            [],
+        )
+
+        if isinstance(urls, str):
+            urls = [urls]
+
+        urls = [
+            str(url).strip()
+            for url in (urls or [])
+            if str(url).strip()
+        ]
+
+        if urls:
+            stages[stage] = urls[0]
+
+    return stages
+
+
+def _latest_activity_report(
+    activity_id,
+    progress: pd.DataFrame,
+) -> dict:
+    if progress.empty:
+        return {
+            "avance": 0,
+            "descripcion_avance": "",
+            "observaciones": "",
+            "usuario": "",
+            "fecha_registro": None,
+        }
+
+    activity_progress = progress[
+        progress["actividad_id"]
+        == activity_id
+    ].copy()
+
+    if activity_progress.empty:
+        return {
+            "avance": 0,
+            "descripcion_avance": "",
+            "observaciones": "",
+            "usuario": "",
+            "fecha_registro": None,
+        }
+
+    if "fecha_registro" in activity_progress.columns:
+        activity_progress = (
+            activity_progress.sort_values(
+                "fecha_registro"
+            )
+        )
+
+    row = activity_progress.iloc[-1]
+
+    return {
+        "avance": row.get(
+            "avance",
+            0,
+        ),
+        "descripcion_avance": row.get(
+            "descripcion_avance",
+            "",
+        ),
+        "observaciones": row.get(
+            "observaciones",
+            "",
+        ),
+        "usuario": row.get(
+            "usuario",
+            "",
+        ),
+        "fecha_registro": row.get(
+            "fecha_registro",
+            None,
+        ),
+    }
+
+
+def _activity_history_detail(
+    activity_id,
+    progress: pd.DataFrame,
+) -> list[str]:
+    """
+    Genera el detalle secuencial de los reportes del supervisor.
+    Cada registro se convierte en una línea para el informe.
+    """
+    if progress.empty:
+        return []
+
+    history = progress[
+        progress["actividad_id"]
+        == activity_id
+    ].copy()
+
+    if history.empty:
+        return []
+
+    if "fecha_registro" in history.columns:
+        history = history.sort_values(
+            "fecha_registro",
+            ascending=True,
+        )
+
+    details = []
+
+    for _, row in history.iterrows():
+        description = _safe_report_text(
+            row.get(
+                "descripcion_avance",
+                "",
+            ),
+            default="",
+        )
+
+        if description:
+            advance = _fmt_number(
+                row.get(
+                    "avance",
+                    0,
+                ),
+                0,
+                "0",
+            )
+
+            details.append(
+                f"{advance}% - {description}"
+            )
+
+    return details
+
+
+def build_activity_report_pdf(
+    selected_activities: pd.DataFrame,
+    ots: pd.DataFrame,
+    progress: pd.DataFrame,
+) -> bytes:
+    """
+    Genera un PDF con una página por actividad.
+    """
+    buffer = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=24,
+        leftMargin=24,
+        topMargin=22,
+        bottomMargin=22,
+    )
+
+    styles = getSampleStyleSheet()
+
+    styles["Normal"].fontName = "Helvetica"
+    styles["Normal"].fontSize = 8.5
+    styles["Normal"].leading = 11
+
+    title_style = styles["Heading2"]
+    title_style.fontName = "Helvetica-Bold"
+    title_style.fontSize = 11
+    title_style.leading = 13
+    title_style.spaceAfter = 6
+
+    small_style = styles["Normal"]
+
+    story = []
+
+    navy = colors.HexColor("#244568")
+    light_gray = colors.HexColor("#F4F6F8")
+    border = colors.HexColor("#1D1D1D")
+    yellow = colors.HexColor("#FFF200")
+
+    for activity_number, (_, activity) in enumerate(
+        selected_activities.iterrows()
+    ):
+        activity_id = activity.get(
+            "id"
+        )
+
+        ot_id = activity.get(
+            "ot_id"
+        )
+
+        ot_match = ots[
+            ots["id"] == ot_id
+        ]
+
+        if ot_match.empty:
+            ot_row = {}
+        else:
+            ot_row = ot_match.iloc[0]
+
+        latest = _latest_activity_report(
+            activity_id,
+            progress,
+        )
+
+        stages = _evidence_stage_urls(
+            activity_id,
+            progress,
+        )
+
+        area_value = (
+            activity.get(
+                "seccion",
+                None,
+            )
+            if "seccion"
+            in selected_activities.columns
+            else None
+        )
+
+        if not _safe_report_text(
+            area_value,
+            default="",
+        ):
+            area_value = activity.get(
+                "especialidad",
+                "-",
+            )
+
+        supervisor_seguridad = (
+            activity.get(
+                "supervisor_seguridad",
+                "-",
+            )
+            if "supervisor_seguridad"
+            in selected_activities.columns
+            else "-"
+        )
+
+        supervisor_cliente = (
+            activity.get(
+                "supervisor_cliente",
+                "-",
+            )
+            if "supervisor_cliente"
+            in selected_activities.columns
+            else "-"
+        )
+
+        senior_cliente = (
+            activity.get(
+                "senior_mantenimiento",
+                "-",
+            )
+            if "senior_mantenimiento"
+            in selected_activities.columns
+            else "-"
+        )
+
+        header_rows = [
+            [
+                Paragraph(
+                    "<b>AREA</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        area_value
+                    ),
+                    small_style,
+                ),
+                "",
+                "",
+            ],
+            [
+                Paragraph(
+                    "<b>OT</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        ot_row.get(
+                            "ot",
+                            "-",
+                        )
+                    ),
+                    small_style,
+                ),
+                "",
+                "",
+            ],
+            [
+                Paragraph(
+                    "<b>DESCRIPCION DE ACTIVIDAD</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        activity.get(
+                            "descripcion",
+                            "-",
+                        )
+                    ),
+                    small_style,
+                ),
+                "",
+                "",
+            ],
+            [
+                Paragraph(
+                    "<b>EQUIPO</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        ot_row.get(
+                            "equipo",
+                            "-",
+                        )
+                    ),
+                    small_style,
+                ),
+                "",
+                "",
+            ],
+            [
+                Paragraph(
+                    "<b>SUPERVISOR OPERATIVO MAININ</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        activity.get(
+                            "supervisor",
+                            "-",
+                        )
+                    ),
+                    small_style,
+                ),
+                Paragraph(
+                    "<b>TURNO / GRUPO</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        activity.get(
+                            "grupo",
+                            "-",
+                        )
+                    ),
+                    small_style,
+                ),
+            ],
+            [
+                Paragraph(
+                    "<b>SUPERVISOR SEGURIDAD MAININ</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        supervisor_seguridad
+                    ),
+                    small_style,
+                ),
+                Paragraph(
+                    "<b>PERSONAL</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _fmt_number(
+                        activity.get(
+                            "personal",
+                            None,
+                        )
+                    ),
+                    small_style,
+                ),
+            ],
+            [
+                Paragraph(
+                    "<b>SUPERVISOR CLIENTE</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        supervisor_cliente
+                    ),
+                    small_style,
+                ),
+                Paragraph(
+                    "<b>HORAS</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _fmt_number(
+                        activity.get(
+                            "duracion_h",
+                            None,
+                        ),
+                        1,
+                    ),
+                    small_style,
+                ),
+            ],
+            [
+                Paragraph(
+                    "<b>SENIOR MANTENIMIENTO CLIENTE</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _safe_report_text(
+                        senior_cliente
+                    ),
+                    small_style,
+                ),
+                Paragraph(
+                    "<b>HH</b>",
+                    small_style,
+                ),
+                Paragraph(
+                    _fmt_number(
+                        activity.get(
+                            "hh_plan",
+                            None,
+                        ),
+                        0,
+                    ),
+                    small_style,
+                ),
+            ],
+        ]
+
+        header_table = Table(
+            header_rows,
+            colWidths=[
+                178,
+                178,
+                82,
+                64,
+            ],
+        )
+
+        header_table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.55,
+                        border,
+                    ),
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (0, -1),
+                        navy,
+                    ),
+                    (
+                        "TEXTCOLOR",
+                        (0, 0),
+                        (0, -1),
+                        colors.white,
+                    ),
+                    (
+                        "BACKGROUND",
+                        (2, 4),
+                        (2, -1),
+                        navy,
+                    ),
+                    (
+                        "TEXTCOLOR",
+                        (2, 4),
+                        (2, -1),
+                        colors.white,
+                    ),
+                    (
+                        "SPAN",
+                        (1, 0),
+                        (3, 0),
+                    ),
+                    (
+                        "SPAN",
+                        (1, 1),
+                        (3, 1),
+                    ),
+                    (
+                        "SPAN",
+                        (1, 2),
+                        (3, 2),
+                    ),
+                    (
+                        "SPAN",
+                        (1, 3),
+                        (3, 3),
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "MIDDLE",
+                    ),
+                    (
+                        "LEFTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        6,
+                    ),
+                    (
+                        "RIGHTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        6,
+                    ),
+                    (
+                        "TOPPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        3,
+                    ),
+                    (
+                        "BOTTOMPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        3,
+                    ),
+                ]
+            )
+        )
+
+        # Resaltar OT y descripción.
+        header_table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "BACKGROUND",
+                        (1, 1),
+                        (3, 1),
+                        yellow,
+                    ),
+                    (
+                        "BACKGROUND",
+                        (1, 2),
+                        (3, 2),
+                        yellow,
+                    ),
+                ]
+            )
+        )
+
+        story.append(
+            header_table
+        )
+
+        story.append(
+            Spacer(
+                1,
+                12,
+            )
+        )
+
+        story.append(
+            Paragraph(
+                "<b>DESCRIPCION DE LAS ACTIVIDADES</b>",
+                title_style,
+            )
+        )
+
+        history_detail = _activity_history_detail(
+            activity_id,
+            progress,
+        )
+
+        if not history_detail:
+            fallback_detail = _safe_report_text(
+                latest.get(
+                    "descripcion_avance",
+                    "",
+                ),
+                default="Sin detalle registrado.",
+            )
+
+            history_detail = [
+                fallback_detail
+            ]
+
+        bullets = "".join(
+            [
+                f"<bullet>&bull;</bullet>{detail}<br/>"
+                for detail in history_detail
+            ]
+        )
+
+        observations = _safe_report_text(
+            latest.get(
+                "observaciones",
+                "",
+            ),
+            default="",
+        )
+
+        detail_html = (
+            "<b>ACTIVIDAD:</b> "
+            + _safe_report_text(
+                activity.get(
+                    "codigo_actividad",
+                    "-",
+                )
+            )
+            + "<br/><b>DETALLE:</b><br/>"
+            + bullets
+        )
+
+        if observations:
+            detail_html += (
+                "<br/><b>OBSERVACIONES / RESTRICCIONES:</b><br/>"
+                + observations
+            )
+
+        detail_table = Table(
+            [
+                [
+                    Paragraph(
+                        detail_html,
+                        small_style,
+                    )
+                ]
+            ],
+            colWidths=[
+                502
+            ],
+        )
+
+        detail_table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "BOX",
+                        (0, 0),
+                        (-1, -1),
+                        0.65,
+                        border,
+                    ),
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (-1, -1),
+                        colors.white,
+                    ),
+                    (
+                        "LEFTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        10,
+                    ),
+                    (
+                        "RIGHTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        10,
+                    ),
+                    (
+                        "TOPPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        8,
+                    ),
+                    (
+                        "BOTTOMPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        8,
+                    ),
+                ]
+            )
+        )
+
+        story.append(
+            detail_table
+        )
+
+        story.append(
+            Spacer(
+                1,
+                12,
+            )
+        )
+
+        story.append(
+            Paragraph(
+                "<b>EVIDENCIAS FOTOGRAFICAS</b>",
+                title_style,
+            )
+        )
+
+        evidence_cells = []
+        evidence_labels = []
+
+        for stage in [
+            "INICIO",
+            "DURANTE",
+            "FINAL",
+        ]:
+            image_buffer = _download_report_image(
+                stages.get(
+                    stage
+                )
+            )
+
+            if image_buffer is not None:
+                try:
+                    img = RLImage(
+                        image_buffer,
+                        width=155,
+                        height=142,
+                        kind="proportional",
+                    )
+                    evidence_cells.append(
+                        img
+                    )
+                except Exception:
+                    evidence_cells.append(
+                        Paragraph(
+                            "Imagen no disponible",
+                            small_style,
+                        )
+                    )
+            else:
+                evidence_cells.append(
+                    Paragraph(
+                        "Sin evidencia",
+                        small_style,
+                    )
+                )
+
+            evidence_labels.append(
+                Paragraph(
+                    f"<b>{stage.capitalize()}</b>",
+                    small_style,
+                )
+            )
+
+        evidence_table = Table(
+            [
+                evidence_cells,
+                evidence_labels,
+            ],
+            colWidths=[
+                167,
+                167,
+                167,
+            ],
+            rowHeights=[
+                150,
+                20,
+            ],
+        )
+
+        evidence_table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.55,
+                        border,
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, 0),
+                        "MIDDLE",
+                    ),
+                    (
+                        "ALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "CENTER",
+                    ),
+                    (
+                        "BACKGROUND",
+                        (0, 1),
+                        (-1, 1),
+                        light_gray,
+                    ),
+                ]
+            )
+        )
+
+        story.append(
+            evidence_table
+        )
+
+        story.append(
+            Spacer(
+                1,
+                8,
+            )
+        )
+
+        footer_text = (
+            f"Avance actual: "
+            f"{_fmt_number(latest.get('avance', 0), 0, '0')}%"
+        )
+
+        if latest.get(
+            "fecha_registro"
+        ) is not None:
+            try:
+                footer_text += (
+                    " | Ultimo reporte: "
+                    + pd.to_datetime(
+                        latest[
+                            "fecha_registro"
+                        ]
+                    ).strftime(
+                        "%d/%m/%Y %H:%M"
+                    )
+                )
+            except Exception:
+                pass
+
+        story.append(
+            Paragraph(
+                footer_text,
+                small_style,
+            )
+        )
+
+        if (
+            activity_number
+            < len(selected_activities)
+            - 1
+        ):
+            story.append(
+                PageBreak()
+            )
+
+    doc.build(
+        story
+    )
+
+    return buffer.getvalue()
+
+
 # ============================================================
 # SIDEBAR / MENÚ
 # ============================================================
@@ -1553,6 +2529,7 @@ with st.sidebar:
             "Evidencias",
             "Informe diario",
             "Reporte PDF",
+            "Informe de Actividades",
             "Administrar OTs",
             "Importar base",
             "Exportar reporte",
@@ -1612,6 +2589,7 @@ ADMIN_ONLY_PAGES = {
     "Evidencias",
     "Informe diario",
     "Reporte PDF",
+    "Informe de Actividades",
     "Administrar OTs",
     "Importar base",
     "Exportar reporte",
@@ -3847,6 +4825,336 @@ if page == "Reporte PDF":
         st.error(
             f"No fue posible generar el PDF: {exc}"
         )
+
+
+
+# ============================================================
+# INFORME DE ACTIVIDADES
+# ============================================================
+if page == "Informe de Actividades":
+    st.subheader(
+        "Informe de Actividades"
+    )
+
+    st.caption(
+        "Genere un informe PDF por OT y actividad con "
+        "detalle operativo y evidencias INICIO / DURANTE / FINAL."
+    )
+
+    if ots.empty or activities.empty:
+        st.info(
+            "No existen OTs o actividades disponibles."
+        )
+
+    else:
+        # --------------------------------------------------------
+        # FILTRO SUPERVISOR
+        # --------------------------------------------------------
+        supervisors = []
+
+        if "supervisor" in activities.columns:
+            supervisors = sorted(
+                [
+                    value
+                    for value in activities[
+                        "supervisor"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                    if value.strip()
+                ]
+            )
+
+        supervisor_options = (
+            ["TODOS"]
+            + supervisors
+        )
+
+        c1, c2, c3 = st.columns(3)
+
+        report_supervisor = c1.selectbox(
+            "Supervisor",
+            supervisor_options,
+            key="report_activity_supervisor",
+        )
+
+        if report_supervisor == "TODOS":
+            report_activities_base = (
+                activities.copy()
+            )
+
+        else:
+            report_activities_base = (
+                activities[
+                    activities[
+                        "supervisor"
+                    ]
+                    .fillna("")
+                    .astype(str)
+                    == report_supervisor
+                ].copy()
+            )
+
+        report_ot_ids = (
+            report_activities_base[
+                "ot_id"
+            ]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        report_ots = ots[
+            ots["id"].isin(
+                report_ot_ids
+            )
+        ].copy()
+
+        ot_options = (
+            report_ots["ot"]
+            .astype(str)
+            .sort_values()
+            .tolist()
+        )
+
+        report_ot = c2.selectbox(
+            "OT",
+            ot_options,
+            index=None,
+            placeholder="Seleccione OT...",
+            key="report_activity_ot",
+        )
+
+        activity_options = []
+
+        report_ot_activities = (
+            pd.DataFrame()
+        )
+
+        if report_ot:
+            report_ot_row = report_ots[
+                report_ots["ot"]
+                .astype(str)
+                == report_ot
+            ].iloc[0]
+
+            report_ot_activities = (
+                report_activities_base[
+                    report_activities_base[
+                        "ot_id"
+                    ]
+                    == report_ot_row["id"]
+                ].copy()
+            )
+
+            if not report_ot_activities.empty:
+                report_ot_activities[
+                    "report_label"
+                ] = (
+                    report_ot_activities[
+                        "codigo_actividad"
+                    ].astype(str)
+                    + " - "
+                    + report_ot_activities[
+                        "descripcion"
+                    ].astype(str)
+                )
+
+                activity_options = (
+                    ["TODAS"]
+                    + report_ot_activities[
+                        "report_label"
+                    ].tolist()
+                )
+
+        report_activity = c3.selectbox(
+            "Actividad",
+            activity_options,
+            index=0
+            if activity_options
+            else None,
+            placeholder=(
+                "Seleccione primero una OT"
+            ),
+            disabled=(
+                not bool(
+                    activity_options
+                )
+            ),
+            key="report_activity_activity",
+        )
+
+        if (
+            report_ot
+            and not report_ot_activities.empty
+        ):
+            if (
+                report_activity
+                == "TODAS"
+            ):
+                selected_report_activities = (
+                    report_ot_activities.copy()
+                )
+
+            elif report_activity:
+                selected_report_activities = (
+                    report_ot_activities[
+                        report_ot_activities[
+                            "report_label"
+                        ]
+                        == report_activity
+                    ].copy()
+                )
+
+            else:
+                selected_report_activities = (
+                    pd.DataFrame()
+                )
+
+            if not selected_report_activities.empty:
+                st.markdown("---")
+
+                r1, r2, r3, r4 = (
+                    st.columns(4)
+                )
+
+                r1.metric(
+                    "OT",
+                    report_ot,
+                )
+
+                r2.metric(
+                    "Actividades",
+                    len(
+                        selected_report_activities
+                    ),
+                )
+
+                r3.metric(
+                    "Supervisor",
+                    (
+                        report_supervisor
+                        if report_supervisor
+                        != "TODOS"
+                        else "Todos"
+                    ),
+                )
+
+                status_preview = (
+                    build_activity_status(
+                        selected_report_activities,
+                        progress,
+                    )
+                )
+
+                preview_progress = (
+                    float(
+                        status_preview[
+                            "avance_real"
+                        ].mean()
+                    )
+                    if not status_preview.empty
+                    else 0.0
+                )
+
+                r4.metric(
+                    "Avance",
+                    f"{preview_progress:.1f}%",
+                )
+
+                preview_cols = [
+                    "codigo_actividad",
+                    "descripcion",
+                    "supervisor",
+                    "grupo",
+                    "inicio_plan",
+                    "fin_plan",
+                    "personal",
+                    "duracion_h",
+                    "hh_plan",
+                ]
+
+                preview_cols = [
+                    col
+                    for col in preview_cols
+                    if col
+                    in selected_report_activities.columns
+                ]
+
+                st.markdown(
+                    "### Actividades incluidas"
+                )
+
+                st.dataframe(
+                    selected_report_activities[
+                        preview_cols
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                with st.spinner(
+                    "Preparando informe PDF..."
+                ):
+                    try:
+                        activity_pdf = (
+                            build_activity_report_pdf(
+                                selected_report_activities,
+                                ots,
+                                progress,
+                            )
+                        )
+
+                        safe_ot_filename = (
+                            "".join(
+                                ch
+                                for ch
+                                in str(report_ot)
+                                if ch.isalnum()
+                                or ch
+                                in "-_"
+                            )
+                            or "OT"
+                        )
+
+                        file_name = (
+                            f"informe_actividades_"
+                            f"{safe_ot_filename}_"
+                            f"{datetime.now():%Y%m%d_%H%M}.pdf"
+                        )
+
+                        st.download_button(
+                            "📥 DESCARGAR INFORME PDF",
+                            data=activity_pdf,
+                            file_name=file_name,
+                            mime="application/pdf",
+                            type="primary",
+                            use_container_width=True,
+                        )
+
+                        if (
+                            len(
+                                selected_report_activities
+                            )
+                            > 1
+                        ):
+                            st.caption(
+                                "El PDF contiene una página "
+                                "independiente por cada actividad."
+                            )
+                        else:
+                            st.caption(
+                                "El PDF contiene el informe "
+                                "de la actividad seleccionada."
+                            )
+
+                    except Exception as exc:
+                        st.error(
+                            "No fue posible generar el informe: "
+                            f"{exc}"
+                        )
 
 
 # ============================================================
