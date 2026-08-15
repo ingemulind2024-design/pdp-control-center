@@ -2239,11 +2239,15 @@ def build_activity_report_pdf(
                 fallback_detail
             ]
 
-        bullets = "".join(
-            [
-                f"<bullet>&bull;</bullet>{detail}<br/>"
-                for detail in history_detail
-            ]
+        # ReportLab Paragraph no admite varios tags <bullet>
+        # dentro del mismo párrafo. Usamos viñetas Unicode simples.
+        detail_lines = [
+            f"• {detail}"
+            for detail in history_detail
+        ]
+
+        details_html = "<br/>".join(
+            detail_lines
         )
 
         observations = _safe_report_text(
@@ -2263,7 +2267,7 @@ def build_activity_report_pdf(
                 )
             )
             + "<br/><b>DETALLE:</b><br/>"
-            + bullets
+            + details_html
         )
 
         if observations:
