@@ -4836,33 +4836,25 @@ if page == "Reporte PDF":
 # INFORME DE ACTIVIDADES
 # ============================================================
 if page == "Informe de Actividades":
-    st.subheader(
-        "Informe de Actividades"
-    )
+    st.subheader("Informe de Actividades")
 
     st.caption(
-        "Genere un informe PDF por OT y actividad con "
+        "Genere un único PDF consolidado o un informe específico. "
+        "Cada actividad se presenta en una página independiente con "
         "detalle operativo y evidencias INICIO / DURANTE / FINAL."
     )
 
     if ots.empty or activities.empty:
-        st.info(
-            "No existen OTs o actividades disponibles."
-        )
+        st.info("No existen OTs o actividades disponibles.")
 
     else:
-        # --------------------------------------------------------
-        # FILTRO SUPERVISOR
-        # --------------------------------------------------------
         supervisors = []
 
         if "supervisor" in activities.columns:
             supervisors = sorted(
                 [
                     value
-                    for value in activities[
-                        "supervisor"
-                    ]
+                    for value in activities["supervisor"]
                     .fillna("")
                     .astype(str)
                     .unique()
@@ -4871,52 +4863,36 @@ if page == "Informe de Actividades":
                 ]
             )
 
-        supervisor_options = (
-            ["TODOS"]
-            + supervisors
-        )
-
         c1, c2, c3 = st.columns(3)
 
         report_supervisor = c1.selectbox(
             "Supervisor",
-            supervisor_options,
+            ["TODOS"] + supervisors,
             key="report_activity_supervisor",
         )
 
         if report_supervisor == "TODOS":
-            report_activities_base = (
-                activities.copy()
-            )
-
+            report_activities_base = activities.copy()
         else:
-            report_activities_base = (
-                activities[
-                    activities[
-                        "supervisor"
-                    ]
-                    .fillna("")
-                    .astype(str)
-                    == report_supervisor
-                ].copy()
-            )
+            report_activities_base = activities[
+                activities["supervisor"]
+                .fillna("")
+                .astype(str)
+                == report_supervisor
+            ].copy()
 
         report_ot_ids = (
-            report_activities_base[
-                "ot_id"
-            ]
+            report_activities_base["ot_id"]
             .dropna()
             .unique()
             .tolist()
         )
 
         report_ots = ots[
-            ots["id"].isin(
-                report_ot_ids
-            )
+            ots["id"].isin(report_ot_ids)
         ].copy()
 
-        ot_options = (
+        ot_values = (
             report_ots["ot"]
             .astype(str)
             .sort_values()
@@ -4925,240 +4901,244 @@ if page == "Informe de Actividades":
 
         report_ot = c2.selectbox(
             "OT",
-            ot_options,
-            index=None,
-            placeholder="Seleccione OT...",
+            ["TODAS"] + ot_values,
             key="report_activity_ot",
         )
 
-        activity_options = []
-
-        report_ot_activities = (
-            pd.DataFrame()
-        )
-
-        if report_ot:
+        # --------------------------------------------------------
+        # ACTIVIDADES SEGÚN OT
+        # --------------------------------------------------------
+        if report_ot == "TODAS":
+            report_ot_activities = report_activities_base.copy()
+            activity_options = ["TODAS"]
+        else:
             report_ot_row = report_ots[
-                report_ots["ot"]
-                .astype(str)
-                == report_ot
+                report_ots["ot"].astype(str) == report_ot
             ].iloc[0]
 
-            report_ot_activities = (
-                report_activities_base[
-                    report_activities_base[
-                        "ot_id"
-                    ]
-                    == report_ot_row["id"]
-                ].copy()
-            )
+            report_ot_activities = report_activities_base[
+                report_activities_base["ot_id"]
+                == report_ot_row["id"]
+            ].copy()
 
             if not report_ot_activities.empty:
-                report_ot_activities[
-                    "report_label"
-                ] = (
-                    report_ot_activities[
-                        "codigo_actividad"
-                    ].astype(str)
+                report_ot_activities["report_label"] = (
+                    report_ot_activities["codigo_actividad"].astype(str)
                     + " - "
-                    + report_ot_activities[
-                        "descripcion"
-                    ].astype(str)
+                    + report_ot_activities["descripcion"].astype(str)
                 )
 
                 activity_options = (
                     ["TODAS"]
-                    + report_ot_activities[
-                        "report_label"
-                    ].tolist()
+                    + report_ot_activities["report_label"].tolist()
                 )
+            else:
+                activity_options = ["TODAS"]
 
         report_activity = c3.selectbox(
             "Actividad",
             activity_options,
-            index=0
-            if activity_options
-            else None,
-            placeholder=(
-                "Seleccione primero una OT"
-            ),
-            disabled=(
-                not bool(
-                    activity_options
-                )
-            ),
             key="report_activity_activity",
+            disabled=(report_ot == "TODAS"),
         )
 
-        if (
-            report_ot
-            and not report_ot_activities.empty
-        ):
-            if (
-                report_activity
-                == "TODAS"
-            ):
-                selected_report_activities = (
-                    report_ot_activities.copy()
-                )
+        # --------------------------------------------------------
+        # SELECCIÓN FINAL
+        # --------------------------------------------------------
+        if report_ot == "TODAS":
+            selected_report_activities = report_activities_base.copy()
 
-            elif report_activity:
-                selected_report_activities = (
-                    report_ot_activities[
-                        report_ot_activities[
-                            "report_label"
-                        ]
-                        == report_activity
-                    ].copy()
-                )
+        elif report_activity == "TODAS":
+            selected_report_activities = report_ot_activities.copy()
 
-            else:
-                selected_report_activities = (
-                    pd.DataFrame()
-                )
+        else:
+            selected_report_activities = report_ot_activities[
+                report_ot_activities["report_label"]
+                == report_activity
+            ].copy()
 
-            if not selected_report_activities.empty:
-                st.markdown("---")
+        if selected_report_activities.empty:
+            st.info("No existen actividades para los filtros seleccionados.")
 
-                r1, r2, r3, r4 = (
-                    st.columns(4)
-                )
+        else:
+            st.markdown("---")
 
-                r1.metric(
-                    "OT",
-                    report_ot,
-                )
+            selected_ot_ids = (
+                selected_report_activities["ot_id"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
 
-                r2.metric(
-                    "Actividades",
-                    len(
-                        selected_report_activities
-                    ),
-                )
+            selected_ots_count = len(selected_ot_ids)
 
-                r3.metric(
-                    "Supervisor",
+            status_preview = build_activity_status(
+                selected_report_activities,
+                progress,
+            )
+
+            preview_progress = (
+                float(status_preview["avance_real"].mean())
+                if not status_preview.empty
+                else 0.0
+            )
+
+            culminadas = (
+                int((status_preview["avance_real"] >= 100).sum())
+                if not status_preview.empty
+                else 0
+            )
+
+            ejecucion = (
+                int(
                     (
-                        report_supervisor
-                        if report_supervisor
-                        != "TODOS"
-                        else "Todos"
-                    ),
+                        (status_preview["avance_real"] > 0)
+                        & (status_preview["avance_real"] < 100)
+                    ).sum()
                 )
+                if not status_preview.empty
+                else 0
+            )
 
-                status_preview = (
-                    build_activity_status(
+            no_iniciadas = (
+                int((status_preview["avance_real"] <= 0).sum())
+                if not status_preview.empty
+                else 0
+            )
+
+            k1, k2, k3, k4 = st.columns(4)
+
+            k1.metric("OTs", selected_ots_count)
+            k2.metric(
+                "Actividades",
+                len(selected_report_activities),
+            )
+            k3.metric(
+                "Supervisor",
+                (
+                    report_supervisor
+                    if report_supervisor != "TODOS"
+                    else "Todos"
+                ),
+            )
+            k4.metric(
+                "Avance general",
+                f"{preview_progress:.1f}%",
+            )
+
+            k5, k6, k7 = st.columns(3)
+            k5.metric("Culminadas", culminadas)
+            k6.metric("En ejecución", ejecucion)
+            k7.metric("No iniciadas", no_iniciadas)
+
+            preview_cols = [
+                "codigo_actividad",
+                "descripcion",
+                "supervisor",
+                "grupo",
+                "inicio_plan",
+                "fin_plan",
+                "personal",
+                "duracion_h",
+                "hh_plan",
+            ]
+
+            preview_cols = [
+                col
+                for col in preview_cols
+                if col in selected_report_activities.columns
+            ]
+
+            st.markdown("### Actividades incluidas")
+
+            st.dataframe(
+                selected_report_activities[preview_cols],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ----------------------------------------------------
+            # GENERAR PDF
+            # ----------------------------------------------------
+            is_general = (
+                report_supervisor == "TODOS"
+                and report_ot == "TODAS"
+            )
+
+            if is_general:
+                button_label = "📥 DESCARGAR INFORME GENERAL CONSOLIDADO"
+                file_prefix = "informe_general_antapaccay"
+            elif report_ot == "TODAS":
+                button_label = (
+                    "📥 DESCARGAR INFORME CONSOLIDADO DEL SUPERVISOR"
+                )
+                safe_supervisor = "".join(
+                    ch
+                    for ch in str(report_supervisor)
+                    if ch.isalnum() or ch in "-_"
+                ) or "supervisor"
+                file_prefix = (
+                    f"informe_supervisor_{safe_supervisor}"
+                )
+            else:
+                button_label = "📥 DESCARGAR INFORME PDF"
+                safe_ot = "".join(
+                    ch
+                    for ch in str(report_ot)
+                    if ch.isalnum() or ch in "-_"
+                ) or "OT"
+                file_prefix = f"informe_actividades_{safe_ot}"
+
+            with st.spinner("Preparando informe PDF..."):
+                try:
+                    activity_pdf = build_activity_report_pdf(
                         selected_report_activities,
+                        ots,
                         progress,
                     )
-                )
 
-                preview_progress = (
-                    float(
-                        status_preview[
-                            "avance_real"
-                        ].mean()
+                    file_name = (
+                        f"{file_prefix}_"
+                        f"{datetime.now():%Y%m%d_%H%M}.pdf"
                     )
-                    if not status_preview.empty
-                    else 0.0
-                )
 
-                r4.metric(
-                    "Avance",
-                    f"{preview_progress:.1f}%",
-                )
+                    st.download_button(
+                        button_label,
+                        data=activity_pdf,
+                        file_name=file_name,
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True,
+                    )
 
-                preview_cols = [
-                    "codigo_actividad",
-                    "descripcion",
-                    "supervisor",
-                    "grupo",
-                    "inicio_plan",
-                    "fin_plan",
-                    "personal",
-                    "duracion_h",
-                    "hh_plan",
-                ]
-
-                preview_cols = [
-                    col
-                    for col in preview_cols
-                    if col
-                    in selected_report_activities.columns
-                ]
-
-                st.markdown(
-                    "### Actividades incluidas"
-                )
-
-                st.dataframe(
-                    selected_report_activities[
-                        preview_cols
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                with st.spinner(
-                    "Preparando informe PDF..."
-                ):
-                    try:
-                        activity_pdf = (
-                            build_activity_report_pdf(
-                                selected_report_activities,
-                                ots,
-                                progress,
-                            )
+                    if is_general:
+                        st.success(
+                            f"Informe general listo: "
+                            f"{selected_ots_count} OT(s) y "
+                            f"{len(selected_report_activities)} "
+                            f"actividad(es) consolidadas en un solo PDF."
+                        )
+                    elif report_ot == "TODAS":
+                        st.caption(
+                            "El PDF consolida todas las OTs y actividades "
+                            "del supervisor seleccionado."
+                        )
+                    elif len(selected_report_activities) > 1:
+                        st.caption(
+                            "El PDF contiene una página independiente "
+                            "por cada actividad de la OT."
+                        )
+                    else:
+                        st.caption(
+                            "El PDF contiene el informe de la actividad "
+                            "seleccionada."
                         )
 
-                        safe_ot_filename = (
-                            "".join(
-                                ch
-                                for ch
-                                in str(report_ot)
-                                if ch.isalnum()
-                                or ch
-                                in "-_"
-                            )
-                            or "OT"
-                        )
-
-                        file_name = (
-                            f"informe_actividades_"
-                            f"{safe_ot_filename}_"
-                            f"{datetime.now():%Y%m%d_%H%M}.pdf"
-                        )
-
-                        st.download_button(
-                            "📥 DESCARGAR INFORME PDF",
-                            data=activity_pdf,
-                            file_name=file_name,
-                            mime="application/pdf",
-                            type="primary",
-                            use_container_width=True,
-                        )
-
-                        if (
-                            len(
-                                selected_report_activities
-                            )
-                            > 1
-                        ):
-                            st.caption(
-                                "El PDF contiene una página "
-                                "independiente por cada actividad."
-                            )
-                        else:
-                            st.caption(
-                                "El PDF contiene el informe "
-                                "de la actividad seleccionada."
-                            )
-
-                    except Exception as exc:
-                        st.error(
-                            "No fue posible generar el informe: "
-                            f"{exc}"
-                        )
+                except Exception as exc:
+                    st.error(
+                        "No fue posible generar el informe: "
+                        f"{exc}"
+                    )
 
 
 # ============================================================
