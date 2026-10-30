@@ -1,4 +1,5 @@
 import io
+import html
 import hmac
 import time
 import uuid
@@ -2916,14 +2917,18 @@ if page == "Registrar avance":
                     ultimo[str(r["actividad_id"])] = r
 
             nrows = len(base)
-            st.caption(f"{nrows} actividad(es). Muestre hasta 8 filas por página para mantener visible la carga de fotografías.")
-            page_count = (nrows + 7) // 8
-            page_num = st.number_input("Página", min_value=1, max_value=max(1,page_count), value=1, step=1, key="registro_tab_pagina")
-            visible = base.iloc[(page_num - 1) * 8:page_num * 8]
+            st.caption(f"{nrows} actividad(es) en una sola tabla. Use los filtros para encontrar rápidamente una actividad.")
+            visible = base.sort_values(["ot_numero", "codigo_actividad"], kind="stable")
 
             st.markdown('''<style>
             .registro-avance-header {background:#082d55;color:#fff;padding:10px 6px;border-radius:5px;font-size:12px;font-weight:700;text-align:center;}
-            div[data-testid="stFileUploader"] small {font-size:10px;}
+            .registro-avance-dato {color:#111827 !important;font-size:13px;font-weight:500;line-height:1.45;overflow-wrap:anywhere;}
+            .registro-avance-dato strong {color:#0a2545 !important;font-weight:750;}
+            div[data-testid="stFileUploader"] small {font-size:10px;color:#111827 !important;}
+            div[data-testid="stTextArea"] textarea,
+            div[data-testid="stNumberInput"] input,
+            div[data-testid="stSelectbox"] div[data-baseweb="select"] * {color:#111827 !important;}
+            div[data-testid="stTextArea"] textarea::placeholder {color:#4b5563 !important;opacity:1;}
             </style>''', unsafe_allow_html=True)
             widths = [1, 1.1, 3.2, 1.4, 1.45, 1.3, 0.9, 0.9, 1.1, 3.2, 1.4, 2.2, 0.7]
             headers = ["OT", "GRUPO", "ACTIVIDAD", "SUPERVISOR", "INICIO", "FIN", "DURACIÓN", "% ACTUAL", "% NUEVO", "DESCRIPCIÓN DEL AVANCE", "TIPO", "FOTO", "VER"]
@@ -2938,13 +2943,22 @@ if page == "Registrar avance":
                 raw_current = current.get("avance", 0) if current is not None else 0
                 current_pct = int(max(0, min(100, round(float(pd.to_numeric(raw_current, errors="coerce") or 0)))))
                 cols = st.columns(widths, gap="small", vertical_alignment="center")
-                cols[0].caption(str(act["ot_numero"]))
-                cols[1].caption(str(act["grupo_f"]))
-                cols[2].caption(f'**{act.get("codigo_actividad", "")}** {act.get("descripcion", "")}')
-                cols[3].caption(str(act["supervisor_f"]))
-                cols[4].caption(str(act.get("inicio_plan", ""))[:16])
-                cols[5].caption(str(act.get("fin_plan", ""))[:16])
-                cols[6].caption(str(act.get("duracion_h", "")))
+                def _texto_celda(columna, valor, negrita=False):
+                    contenido = html.escape(str(valor))
+                    if negrita:
+                        contenido = f"<strong>{contenido}</strong>"
+                    columna.markdown(
+                        f'<div class="registro-avance-dato">{contenido}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                _texto_celda(cols[0], act["ot_numero"])
+                _texto_celda(cols[1], act["grupo_f"])
+                _texto_celda(cols[2], f'{act.get("codigo_actividad", "")} - {act.get("descripcion", "")}', True)
+                _texto_celda(cols[3], act["supervisor_f"])
+                _texto_celda(cols[4], str(act.get("inicio_plan", ""))[:16])
+                _texto_celda(cols[5], str(act.get("fin_plan", ""))[:16])
+                _texto_celda(cols[6], act.get("duracion_h", ""))
                 cols[7].markdown(f"**{current_pct}%**")
                 pct_key = f"rt_pct_{aid}"
                 if pct_key not in st.session_state:
