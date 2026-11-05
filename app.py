@@ -2999,7 +2999,17 @@ if page == "Registrar avance":
                     st.session_state[pct_key] = current_pct
                 new_pct = cols[8].number_input("% nuevo", 0, 100, step=1, key=pct_key, label_visibility="collapsed")
                 desc = cols[9].text_area("Descripción del avance", key=f"rt_desc_{aid}", placeholder="Describa el avance realizado...", height=72, label_visibility="collapsed")
-                stage = cols[10].selectbox("Etapa", ["INICIO", "DURANTE", "FINAL"], key=f"rt_stage_{aid}", label_visibility="collapsed")
+                # Solo se permiten nuevas evidencias DURANTE o FINAL.
+                # Los registros históricos INICIO permanecen en Supabase.
+                stage_key = f"rt_stage_{aid}"
+                if st.session_state.get(stage_key) == "INICIO":
+                    st.session_state[stage_key] = "DURANTE"
+                stage = cols[10].selectbox(
+                    "Etapa",
+                    ["DURANTE", "FINAL"],
+                    key=stage_key,
+                    label_visibility="collapsed",
+                )
                 # Foto y Guardar pertenecen exclusivamente a esta fila.
                 # El selector se abre encima de la tabla, dentro de un popover.
                 with cols[11]:
