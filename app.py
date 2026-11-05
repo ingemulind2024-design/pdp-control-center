@@ -2864,13 +2864,17 @@ if page == "Desempeño supervisores":
 
 # ============================================================
 # ============================================================
-# REGISTRAR AVANCE DIRECTAMENTE EN TABLA - V28
+# REGISTRAR AVANCE DIRECTAMENTE EN TABLA - V31 RESPONSIVA
 # ============================================================
 if page == "Registrar avance":
-    # Limpiar widgets solo al comienzo del siguiente rerun.
+    # Limpiar el texto y liberar el uploader anterior tras un guardado exitoso.
+    # En Streamlit, un file_uploader no se vacía de forma fiable quitando
+    # únicamente la clave: se requiere un NUEVO key en el siguiente render.
     for _clear_id in st.session_state.pop("registro_tab_clear_ids", []):
         st.session_state.pop(f"rt_desc_{_clear_id}", None)
-        st.session_state.pop(f"rt_photo_{_clear_id}", None)
+        _generation = int(st.session_state.get(f"rt_photo_generation_{_clear_id}", 0))
+        if _generation > 0:
+            st.session_state.pop(f"rt_photo_{_clear_id}_g{_generation - 1}", None)
     st.subheader("Reporte de avance")
     st.caption("Cada actividad tiene sus propios botones para cargar fotografías, guardar el avance y ver evidencias. No hay botón de guardado al final de la tabla.")
     # Mostrar confirmación antes de crear los controles de la tabla.
@@ -2909,6 +2913,30 @@ if page == "Registrar avance":
                 st.session_state.pop(name, None)
             st.rerun()
 
+        # Buscador para localizar una actividad desde el celular.
+        busqueda_registro = st.text_input(
+            "🔎 Buscar actividad, OT, grupo o supervisor",
+            key="registro_tab_busqueda_v31",
+            placeholder="Ej.: ACT-210, 11559519, molinos o RAUL NINA",
+        ).strip()
+        if busqueda_registro:
+            columnas_busqueda = [
+                "codigo_actividad", "descripcion", "ot_numero",
+                "grupo_f", "supervisor_f", "equipo",
+            ]
+            columnas_busqueda = [c for c in columnas_busqueda if c in base.columns]
+            coincidencias = pd.Series(False, index=base.index)
+            for c in columnas_busqueda:
+                coincidencias |= base[c].fillna("").astype(str).str.contains(
+                    busqueda_registro, case=False, regex=False, na=False
+                )
+            base = base[coincidencias].copy()
+
+        st.caption(
+            "📱 En celular: encuentre la actividad con el buscador y "
+            "deslice la tabla horizontalmente para registrar el avance."
+        )
+
         if base.empty:
             st.info("No hay actividades para los filtros indicados.")
         else:
@@ -2933,174 +2961,248 @@ if page == "Registrar avance":
             div[data-testid="stNumberInput"] input,
             div[data-testid="stSelectbox"] div[data-baseweb="select"] * {color:#111827 !important;}
             div[data-testid="stTextArea"] textarea::placeholder {color:#4b5563 !important;opacity:1;}
+
+            /* V31: tabla horizontal en celular; no apilar las columnas. */
+            @media (max-width: 800px) {
+              .st-key-rt_tabla_responsiva {
+                overflow-x: auto !important;
+                overflow-y: visible !important;
+                -webkit-overflow-scrolling: touch;
+                overscroll-behavior-x: contain;
+                max-width: 100% !important;
+                border: 1px solid #d8e0ec;
+                border-radius: 9px;
+                padding: 4px 5px 10px;
+              }
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] {
+                display: flex !important;
+                flex-direction: row !important;
+                flex-wrap: nowrap !important;
+                align-items: center !important;
+                gap: 7px !important;
+                min-width: 1200px !important;
+                width: 1200px !important;
+              }
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+                box-sizing: border-box !important;
+                flex-grow: 0 !important;
+                flex-shrink: 0 !important;
+                min-width: 0 !important;
+                width: 0 !important;
+              }
+              /* Ocultar sólo datos secundarios en celular. */
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2),
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(4),
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(5),
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(6),
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(7) {
+                display: none !important;
+              }
+              /* Empezar por ACTIVIDAD para encontrarla rápidamente. */
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(1)  {flex-basis: 92px !important; width: 92px !important; order: 2;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(3)  {flex-basis: 255px !important; width: 255px !important; order: 1;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(8)  {flex-basis: 73px !important; width: 73px !important; order: 3;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(9)  {flex-basis: 82px !important; width: 82px !important; order: 4;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(10) {flex-basis: 225px !important; width: 225px !important; order: 5;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(11) {flex-basis: 105px !important; width: 105px !important; order: 6;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(12) {flex-basis: 155px !important; width: 155px !important; order: 7;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(13) {flex-basis: 77px !important; width: 77px !important; order: 8;}
+              .st-key-rt_tabla_responsiva div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(14) {flex-basis: 65px !important; width: 65px !important; order: 9;}
+              .st-key-rt_tabla_responsiva .registro-avance-header {
+                font-size: 11px; line-height: 1.2; padding: 8px 3px;
+              }
+              .st-key-rt_tabla_responsiva .registro-avance-dato {
+                font-size: 12px; line-height: 1.4;
+              }
+              .st-key-rt_tabla_responsiva textarea {
+                min-height: 65px !important;
+                color: #111827 !important;
+              }
+              .st-key-rt_tabla_responsiva input {color: #111827 !important;}
+              .st-key-rt_tabla_responsiva div[data-testid="stDivider"] {
+                min-width: 1200px;
+              }
+            }
             </style>''', unsafe_allow_html=True)
             widths = [1, 1.1, 3.2, 1.4, 1.45, 1.3, 0.9, 0.9, 1.1, 3.2, 1.4, 2.2, 1.1, 0.7]
-            headers = ["OT", "GRUPO", "ACTIVIDAD", "SUPERVISOR", "INICIO", "FIN", "DURACIÓN", "% ACTUAL", "% NUEVO", "DESCRIPCIÓN DEL AVANCE", "TIPO", "FOTO", "GUARDAR", "VER"]
-            headcols = st.columns(widths, gap="small")
-            for c, label in zip(headcols, headers):
-                c.markdown(f'<div class="registro-avance-header">{label}</div>', unsafe_allow_html=True)
+            with st.container(key="rt_tabla_responsiva"):
+                headers = ["OT", "GRUPO", "ACTIVIDAD", "SUPERVISOR", "INICIO", "FIN", "DURACIÓN", "% ACTUAL", "% NUEVO", "DESCRIPCIÓN DEL AVANCE", "TIPO", "FOTO", "GUARDAR", "VER"]
+                headcols = st.columns(widths, gap="small")
+                for c, label in zip(headcols, headers):
+                    c.markdown(f'<div class="registro-avance-header">{label}</div>', unsafe_allow_html=True)
 
-            # Ventana para VER evidencias de una actividad sin enviarlas
-            # a un bloque debajo de todas las actividades.
-            @st.dialog("Evidencias registradas", width="large")
-            def _ver_evidencias_actividad(actividad_id, codigo_actividad):
-                st.markdown(f"**Actividad:** {codigo_actividad}")
-                if progress.empty or "actividad_id" not in progress.columns:
-                    st.info("Esta actividad todavía no tiene reportes.")
-                    return
-                existing = progress[
-                    progress["actividad_id"].astype(str) == str(actividad_id)
-                ]
-                if existing.empty:
-                    st.info("Esta actividad todavía no tiene reportes.")
-                    return
-                if "fecha_registro" in existing.columns:
-                    existing = existing.sort_values("fecha_registro", ascending=False)
-                for _, report in existing.iterrows():
-                    st.caption(
-                        f'{report.get("tipo_evidencia", "")} · '
-                        f'{report.get("descripcion_avance", "")}'
-                    )
-                    urls = report.get("evidencias", [])
-                    if isinstance(urls, str):
-                        urls = [urls]
-                    if not isinstance(urls, (list, tuple)):
-                        urls = []
-                    for url in urls:
-                        if url:
-                            st.image(url, width=330)
-                    st.divider()
-
-            for _, act in visible.iterrows():
-                aid = str(act["id_key"])
-                current = ultimo.get(aid)
-                raw_current = current.get("avance", 0) if current is not None else 0
-                current_pct = int(max(0, min(100, round(float(pd.to_numeric(raw_current, errors="coerce") or 0)))))
-                cols = st.columns(widths, gap="small", vertical_alignment="center")
-                def _texto_celda(columna, valor, negrita=False):
-                    contenido = html.escape(str(valor))
-                    if negrita:
-                        contenido = f"<strong>{contenido}</strong>"
-                    columna.markdown(
-                        f'<div class="registro-avance-dato">{contenido}</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                _texto_celda(cols[0], act["ot_numero"])
-                _texto_celda(cols[1], act["grupo_f"])
-                _texto_celda(cols[2], f'{act.get("codigo_actividad", "")} - {act.get("descripcion", "")}', True)
-                _texto_celda(cols[3], act["supervisor_f"])
-                _texto_celda(cols[4], str(act.get("inicio_plan", ""))[:16])
-                _texto_celda(cols[5], str(act.get("fin_plan", ""))[:16])
-                _texto_celda(cols[6], act.get("duracion_h", ""))
-                cols[7].markdown(f"**{current_pct}%**")
-                pct_key = f"rt_pct_{aid}"
-                if pct_key not in st.session_state:
-                    st.session_state[pct_key] = current_pct
-                new_pct = cols[8].number_input("% nuevo", 0, 100, step=1, key=pct_key, label_visibility="collapsed")
-                desc = cols[9].text_area("Descripción del avance", key=f"rt_desc_{aid}", placeholder="Describa el avance realizado...", height=72, label_visibility="collapsed")
-                # Solo se permiten nuevas evidencias DURANTE o FINAL.
-                # Los registros históricos INICIO permanecen en Supabase.
-                stage_key = f"rt_stage_{aid}"
-                if st.session_state.get(stage_key) == "INICIO":
-                    st.session_state[stage_key] = "DURANTE"
-                stage = cols[10].selectbox(
-                    "Etapa",
-                    ["DURANTE", "FINAL"],
-                    key=stage_key,
-                    label_visibility="collapsed",
-                )
-                # Foto y Guardar pertenecen exclusivamente a esta fila.
-                # El selector se abre encima de la tabla, dentro de un popover.
-                with cols[11]:
-                    foto_seleccionada = st.session_state.get(f"rt_photo_{aid}", []) or []
-                    etiqueta_foto = (
-                        f"📷 Foto ({len(foto_seleccionada)})"
-                        if foto_seleccionada else "📷 Cargar foto"
-                    )
-                    with st.popover(etiqueta_foto, use_container_width=True):
-                        st.caption(f'Evidencia de {act.get("codigo_actividad", aid)}')
-                        photos = st.file_uploader(
-                            "Seleccionar fotografías",
-                            type=["jpg", "jpeg", "png", "webp"],
-                            accept_multiple_files=True,
-                            key=f"rt_photo_{aid}",
+                # Ventana para VER evidencias de una actividad sin enviarlas
+                # a un bloque debajo de todas las actividades.
+                @st.dialog("Evidencias registradas", width="large")
+                def _ver_evidencias_actividad(actividad_id, codigo_actividad):
+                    st.markdown(f"**Actividad:** {codigo_actividad}")
+                    if progress.empty or "actividad_id" not in progress.columns:
+                        st.info("Esta actividad todavía no tiene reportes.")
+                        return
+                    existing = progress[
+                        progress["actividad_id"].astype(str) == str(actividad_id)
+                    ]
+                    if existing.empty:
+                        st.info("Esta actividad todavía no tiene reportes.")
+                        return
+                    if "fecha_registro" in existing.columns:
+                        existing = existing.sort_values("fecha_registro", ascending=False)
+                    for _, report in existing.iterrows():
+                        st.caption(
+                            f'{report.get("tipo_evidencia", "")} · '
+                            f'{report.get("descripcion_avance", "")}'
                         )
-                        if photos:
-                            st.caption(f"{len(photos)} fotografía(s) listas para guardar")
-                with cols[12]:
-                    guardar_fila = st.button(
-                        "💾", key=f"rt_save_{aid}",
-                        help=f'Guardar solamente {act.get("codigo_actividad", aid)}',
-                        use_container_width=True,
-                    )
-                with cols[13]:
-                    if st.button("👁", key=f"rt_view_{aid}", help="Ver evidencias registradas"):
-                        _ver_evidencias_actividad(aid, act.get("codigo_actividad", aid))
+                        urls = report.get("evidencias", [])
+                        if isinstance(urls, str):
+                            urls = [urls]
+                        if not isinstance(urls, (list, tuple)):
+                            urls = []
+                        for url in urls:
+                            if url:
+                                st.image(url, width=330)
+                        st.divider()
 
-                if guardar_fila:
-                    descripcion_limpia = str(desc or "").strip()
-                    if not descripcion_limpia:
-                        st.warning(
-                            f'Escriba la descripción de avance de '
-                            f'{act.get("codigo_actividad", aid)} antes de guardar.'
+                for _, act in visible.iterrows():
+                    aid = str(act["id_key"])
+                    current = ultimo.get(aid)
+                    raw_current = current.get("avance", 0) if current is not None else 0
+                    current_pct = int(max(0, min(100, round(float(pd.to_numeric(raw_current, errors="coerce") or 0)))))
+                    cols = st.columns(widths, gap="small", vertical_alignment="center")
+                    def _texto_celda(columna, valor, negrita=False):
+                        contenido = html.escape(str(valor))
+                        if negrita:
+                            contenido = f"<strong>{contenido}</strong>"
+                        columna.markdown(
+                            f'<div class="registro-avance-dato">{contenido}</div>',
+                            unsafe_allow_html=True,
                         )
-                    elif len(photos or []) > 10:
-                        st.error("Máximo 10 fotografías por actividad y registro.")
-                    else:
-                        urls = []
-                        errores_fotos = []
-                        with st.spinner(
-                            f'Guardando {act.get("codigo_actividad", aid)}...'
-                        ):
-                            for photo in (photos or []):
-                                try:
-                                    resultado = upload_evidence(
-                                        photo,
-                                        str(act["ot_numero"]),
-                                        str(act["id"]),
-                                        max_retries=3,
-                                    )
-                                    urls.append(resultado["url"])
-                                except Exception as exc:
-                                    errores_fotos.append(
-                                        f'{getattr(photo, "name", "Foto")}: {exc}'
-                                    )
-                            if errores_fotos:
-                                st.error(
-                                    "No se guardó el reporte porque falló la carga "
-                                    "de una o más fotografías."
-                                )
-                                for _error in errores_fotos:
-                                    st.code(_error)
-                            else:
-                                payload = {
-                                    "actividad_id": int(act["id"]),
-                                    "avance": int(new_pct),
-                                    "descripcion_avance": descripcion_limpia,
-                                    "observaciones": "",
-                                    "evidencias": urls,
-                                    "tipo_evidencia": stage,
-                                    "usuario": st.session_state.get("username", ""),
-                                    "fecha_registro": datetime.now(timezone.utc).isoformat(),
-                                }
-                                try:
-                                    supabase.table("avances_actividad").insert(payload).execute()
-                                except Exception as exc:
+
+                    _texto_celda(cols[0], act["ot_numero"])
+                    _texto_celda(cols[1], act["grupo_f"])
+                    _texto_celda(cols[2], f'{act.get("codigo_actividad", "")} - {act.get("descripcion", "")}', True)
+                    _texto_celda(cols[3], act["supervisor_f"])
+                    _texto_celda(cols[4], str(act.get("inicio_plan", ""))[:16])
+                    _texto_celda(cols[5], str(act.get("fin_plan", ""))[:16])
+                    _texto_celda(cols[6], act.get("duracion_h", ""))
+                    cols[7].markdown(f"**{current_pct}%**")
+                    pct_key = f"rt_pct_{aid}"
+                    if pct_key not in st.session_state:
+                        st.session_state[pct_key] = current_pct
+                    new_pct = cols[8].number_input("% nuevo", 0, 100, step=1, key=pct_key, label_visibility="collapsed")
+                    desc = cols[9].text_area("Descripción del avance", key=f"rt_desc_{aid}", placeholder="Describa el avance realizado...", height=72, label_visibility="collapsed")
+                    # Solo se permiten nuevas evidencias DURANTE o FINAL.
+                    # Los registros históricos INICIO permanecen en Supabase.
+                    stage_key = f"rt_stage_{aid}"
+                    if st.session_state.get(stage_key) == "INICIO":
+                        st.session_state[stage_key] = "DURANTE"
+                    stage = cols[10].selectbox(
+                        "Etapa",
+                        ["DURANTE", "FINAL"],
+                        key=stage_key,
+                        label_visibility="collapsed",
+                    )
+                    # Foto y Guardar pertenecen exclusivamente a esta fila.
+                    # El selector se abre encima de la tabla, dentro de un popover.
+                    with cols[11]:
+                        # Cada actividad dispone de su propio selector. Al guardar,
+                        # aumentamos su generación: el nuevo key crea un uploader
+                        # vacío sin afectar las fotografías de otras actividades.
+                        photo_generation_key = f"rt_photo_generation_{aid}"
+                        photo_generation = int(st.session_state.get(photo_generation_key, 0))
+                        photo_widget_key = f"rt_photo_{aid}_g{photo_generation}"
+                        foto_seleccionada = st.session_state.get(photo_widget_key, []) or []
+                        etiqueta_foto = (
+                            f"📷 Foto ({len(foto_seleccionada)})"
+                            if foto_seleccionada else "📷 Cargar foto"
+                        )
+                        with st.popover(etiqueta_foto, use_container_width=True):
+                            st.caption(f'Evidencia de {act.get("codigo_actividad", aid)}')
+                            photos = st.file_uploader(
+                                "Seleccionar fotografías",
+                                type=["jpg", "jpeg", "png", "webp"],
+                                accept_multiple_files=True,
+                                key=photo_widget_key,
+                            )
+                            if photos:
+                                st.caption(f"{len(photos)} fotografía(s) listas para guardar")
+                    with cols[12]:
+                        guardar_fila = st.button(
+                            "💾", key=f"rt_save_{aid}",
+                            help=f'Guardar solamente {act.get("codigo_actividad", aid)}',
+                            use_container_width=True,
+                        )
+                    with cols[13]:
+                        if st.button("👁", key=f"rt_view_{aid}", help="Ver evidencias registradas"):
+                            _ver_evidencias_actividad(aid, act.get("codigo_actividad", aid))
+
+                    if guardar_fila:
+                        descripcion_limpia = str(desc or "").strip()
+                        if not descripcion_limpia:
+                            st.warning(
+                                f'Escriba la descripción de avance de '
+                                f'{act.get("codigo_actividad", aid)} antes de guardar.'
+                            )
+                        elif len(photos or []) > 10:
+                            st.error("Máximo 10 fotografías por actividad y registro.")
+                        else:
+                            urls = []
+                            errores_fotos = []
+                            with st.spinner(
+                                f'Guardando {act.get("codigo_actividad", aid)}...'
+                            ):
+                                for photo in (photos or []):
+                                    try:
+                                        resultado = upload_evidence(
+                                            photo,
+                                            str(act["ot_numero"]),
+                                            str(act["id"]),
+                                            max_retries=3,
+                                        )
+                                        urls.append(resultado["url"])
+                                    except Exception as exc:
+                                        errores_fotos.append(
+                                            f'{getattr(photo, "name", "Foto")}: {exc}'
+                                        )
+                                if errores_fotos:
                                     st.error(
-                                        f'No se pudo guardar la actividad '
-                                        f'{act.get("codigo_actividad", aid)}: {exc}'
+                                        "No se guardó el reporte porque falló la carga "
+                                        "de una o más fotografías."
                                     )
+                                    for _error in errores_fotos:
+                                        st.code(_error)
                                 else:
-                                    invalidate()
-                                    st.session_state.setdefault(
-                                        "registro_tab_clear_ids", []
-                                    ).append(aid)
-                                    st.session_state["registro_tab_saved"] = (
-                                        act.get("codigo_actividad", aid)
-                                    )
-                                    st.rerun()
-                st.divider()
+                                    payload = {
+                                        "actividad_id": int(act["id"]),
+                                        "avance": int(new_pct),
+                                        "descripcion_avance": descripcion_limpia,
+                                        "observaciones": "",
+                                        "evidencias": urls,
+                                        "tipo_evidencia": stage,
+                                        "usuario": st.session_state.get("username", ""),
+                                        "fecha_registro": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                    try:
+                                        supabase.table("avances_actividad").insert(payload).execute()
+                                    except Exception as exc:
+                                        st.error(
+                                            f'No se pudo guardar la actividad '
+                                            f'{act.get("codigo_actividad", aid)}: {exc}'
+                                        )
+                                    else:
+                                        # Cambiar el identificador del file_uploader
+                                        # SOLO después de confirmar el guardado en
+                                        # Supabase. Esto descarta la foto visible al
+                                        # instante y evita enviarla dos veces.
+                                        st.session_state[photo_generation_key] = photo_generation + 1
+                                        invalidate()
+                                        st.session_state.setdefault(
+                                            "registro_tab_clear_ids", []
+                                        ).append(aid)
+                                        st.session_state["registro_tab_saved"] = (
+                                            act.get("codigo_actividad", aid)
+                                        )
+                                        st.rerun()
+                    st.divider()
 
 
 
