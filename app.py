@@ -2864,7 +2864,7 @@ if page == "Desempeño supervisores":
 
 # ============================================================
 # ============================================================
-# REGISTRAR AVANCE DIRECTAMENTE EN TABLA - V25
+# REGISTRAR AVANCE DIRECTAMENTE EN TABLA - V27
 # ============================================================
 if page == "Registrar avance":
     # Limpiar widgets solo al comienzo del siguiente rerun.
@@ -2966,7 +2966,20 @@ if page == "Registrar avance":
                 new_pct = cols[8].number_input("% nuevo", 0, 100, step=1, key=pct_key, label_visibility="collapsed")
                 desc = cols[9].text_area("Descripción del avance", key=f"rt_desc_{aid}", placeholder="Describa el avance realizado...", height=72, label_visibility="collapsed")
                 stage = cols[10].selectbox("Etapa", ["INICIO", "DURANTE", "FINAL"], key=f"rt_stage_{aid}", label_visibility="collapsed")
-                photos = cols[11].file_uploader("Cargar foto", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True, key=f"rt_photo_{aid}", label_visibility="collapsed")
+                # El botón se muestra en la MISMA FILA de cada actividad.
+                # El selector de archivos queda dentro del popover, evitando
+                # el bloque grande y el signo «+» debajo de las filas.
+                with cols[11]:
+                    with st.popover("📷 Cargar evidencia", use_container_width=True):
+                        st.caption(f'Evidencia de {act.get("codigo_actividad", aid)}')
+                        photos = st.file_uploader(
+                            "Seleccionar fotografías",
+                            type=["jpg", "jpeg", "png", "webp"],
+                            accept_multiple_files=True,
+                            key=f"rt_photo_{aid}",
+                        )
+                        if photos:
+                            st.caption(f"{len(photos)} foto(s) seleccionada(s)")
                 with cols[12]:
                     if st.button("📷", key=f"rt_view_{aid}", help="Ver evidencias registradas"):
                         st.session_state["registro_tab_ver"] = aid
