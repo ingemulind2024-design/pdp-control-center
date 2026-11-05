@@ -1,15 +1,20 @@
 import io
+import base64
+import json
+import hashlib
+import secrets
 import html
 import hmac
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pandas as pd
 import requests
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import extra_streamlit_components as stx
 from PIL import Image, ImageOps
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -92,11 +97,172 @@ def load_users() -> dict:
     return users
 
 
+# ============================================================
+# SESIÓN PERSISTENTE SEGURA - ANTAPACCAY (7 DÍAS)
+# ============================================================
+# Las cookies nunca almacenan usuario/contraseña en texto plano.
+# Se firma un token con una clave exclusiva del servidor. Su firma
+# depende también de la contraseña actual del usuario, de modo que
+# cambiar esa contraseña invalida las sesiones previas.
+COOKIE_SESION = "mainin_antapaccay_session_v32"
+DIAS_SESION_PERSISTENTE = 7
+COOKIE_MAX_AGE = DIAS_SESION_PERSISTENTE * 24 * 60 * 60
+
+cookie_manager = stx.CookieManager(key="mainin_antapaccay_cookie_manager")
+
+
+def _session_signing_key() -> bytes | None:
+    """Obtiene una clave privada persistente de Streamlit Secrets.
+
+    Prioridad: [session].signing_key. Si ya existe la Service Role Key,
+    puede usarse como origen secreto para derivar una clave independiente.
+    Nunca se usa la clave anon/publishable de Supabase.
+    """
+    raw = ""
+    try:
+        raw = str(st.secrets.get("session", {}).get("signing_key", "")).strip()
+    except Exception:
+        pass
+    if not raw:
+        try:
+            raw = str(st.secrets.get("supabase_admin", {}).get("key", "")).strip()
+        except Exception:
+            pass
+    if not raw:
+        return None
+    return hmac.new(
+        raw.encode("utf-8"),
+        b"MAININ/ANTAPACCAY/AUTH-COOKIE/V1",
+        hashlib.sha256,
+    ).digest()
+
+
+def _account_signing_key(base_key: bytes, username: str, account: dict) -> bytes:
+    """Vincula cada token con la credencial actual del usuario."""
+    return hmac.new(
+        base_key,
+        ("account:" + username + "\x00" + account["password"]).encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+
+
+def _make_session_token(username: str, account: dict) -> str | None:
+    base_key = _session_signing_key()
+    if not base_key:
+        return None
+    now = int(time.time())
+    payload = {
+        "v": 1,
+        "u": username,
+        "iat": now,
+        "exp": now + COOKIE_MAX_AGE,
+        "nonce": secrets.token_urlsafe(12),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signing_key = _account_signing_key(base_key, username, account)
+    signature = hmac.new(signing_key, encoded.encode("ascii"), hashlib.sha256).digest()
+    return encoded + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+
+
+def _verify_session_token(raw_token: object, users: dict) -> tuple[str, dict] | None:
+    base_key = _session_signing_key()
+    if not base_key or not isinstance(raw_token, str) or len(raw_token) > 2048:
+        return None
+    try:
+        encoded, encoded_sig = raw_token.split(".")
+        payload = json.loads(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        )
+        username = payload.get("u")
+        account = users.get(username)
+        if not account or not account.get("password"):
+            return None
+        now = int(time.time())
+        issued = int(payload.get("iat", 0))
+        expires = int(payload.get("exp", 0))
+        if (payload.get("v") != 1 or issued > now + 60 or
+                issued <= 0 or expires <= now or
+                expires - issued > COOKIE_MAX_AGE):
+            return None
+        signature = base64.urlsafe_b64decode(
+            encoded_sig + "=" * (-len(encoded_sig) % 4)
+        )
+        user_key = _account_signing_key(base_key, username, account)
+        expected = hmac.new(user_key, encoded.encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        return username, account
+    except (ValueError, TypeError, KeyError, UnicodeError, AttributeError):
+        return None
+
+
+def _set_authenticated_user(username: str, account: dict) -> None:
+    st.session_state["authenticated"] = True
+    st.session_state["username"] = username
+    st.session_state["display_name"] = account["name"]
+    st.session_state["role"] = account["role"]
+
+
+def _read_session_cookie() -> str | None:
+    # st.context.cookies refleja la petición inicial. La lectura por
+    # CookieManager contempla navegadores que cargan la cookie después.
+    try:
+        cookie = cookie_manager.get(COOKIE_SESION)
+        if isinstance(cookie, str) and cookie:
+            return cookie
+    except Exception:
+        pass
+    try:
+        cookie = st.context.cookies.get(COOKIE_SESION)
+        if isinstance(cookie, str) and cookie:
+            return cookie
+    except Exception:
+        pass
+    return None
+
+
+def _handle_cookie_operations() -> None:
+    """Ejecuta la orden en una pasada completa, no antes de st.rerun()."""
+    token = st.session_state.pop("auth_cookie_write_pending", None)
+    if token:
+        try:
+            cookie_manager.set(
+                COOKIE_SESION,
+                token,
+                key="set_antapaccay_" + hashlib.sha256(token.encode()).hexdigest()[:16],
+                path="/",
+                expires_at=datetime.now(timezone.utc) + timedelta(days=DIAS_SESION_PERSISTENTE),
+                max_age=COOKIE_MAX_AGE,
+                secure=True,
+                same_site="strict",
+            )
+        except Exception:
+            st.warning("La sesión está iniciada, pero no se pudo guardar en este navegador.")
+
+    if st.session_state.pop("auth_cookie_delete_pending", False):
+        try:
+            cookie_manager.delete(COOKIE_SESION, key="delete_antapaccay_cookie")
+        except Exception:
+            st.warning("No fue posible eliminar la cookie de este navegador.")
+
+
+_handle_cookie_operations()
+
+
 def authenticate() -> bool:
     if st.session_state.get("authenticated"):
         return True
 
     users = load_users()
+    if not st.session_state.get("auth_cookie_restore_blocked", False):
+        existing_token = _read_session_cookie()
+        restored = _verify_session_token(existing_token, users)
+        if restored:
+            username, account = restored
+            _set_authenticated_user(username, account)
+            return True
 
     st.markdown(
         """
@@ -125,24 +291,38 @@ def authenticate() -> bool:
     )
 
     _, center, _ = st.columns([1, 1.1, 1])
-
     with center:
         with st.form("login"):
             username = st.text_input("Usuario")
             password = st.text_input("Contraseña", type="password")
+            remember = st.checkbox(
+                "Mantener sesión iniciada durante 7 días",
+                value=True,
+                disabled=(_session_signing_key() is None),
+                help="Usar preferentemente en un dispositivo personal.",
+            )
             submit = st.form_submit_button(
-                "INGRESAR",
-                type="primary",
-                use_container_width=True,
+                "INGRESAR", type="primary", use_container_width=True
+            )
+
+        if _session_signing_key() is None:
+            st.caption(
+                "Para recordar la sesión, configure [session].signing_key "
+                "en Secrets de Streamlit. El ingreso normal sigue disponible."
             )
 
         if submit:
             account = users.get(username)
             if account and hmac.compare_digest(password, account["password"]):
-                st.session_state.authenticated = True
-                st.session_state.username = username
-                st.session_state.display_name = account["name"]
-                st.session_state.role = account["role"]
+                _set_authenticated_user(username, account)
+                st.session_state["auth_cookie_restore_blocked"] = False
+                if remember:
+                    token = _make_session_token(username, account)
+                    if token:
+                        st.session_state["auth_cookie_write_pending"] = token
+                else:
+                    st.session_state["auth_cookie_delete_pending"] = True
+                # La cookie se escribe en la siguiente ejecución completa.
                 st.rerun()
             else:
                 st.error("Usuario o contraseña incorrectos.")
@@ -2568,16 +2748,12 @@ with st.sidebar:
         use_container_width=True,
     ):
         for key in [
-            "authenticated",
-            "username",
-            "display_name",
-            "role",
+            "authenticated", "username", "display_name", "role",
+            "auth_cookie_write_pending",
         ]:
-            st.session_state.pop(
-                key,
-                None,
-            )
-
+            st.session_state.pop(key, None)
+        st.session_state["auth_cookie_restore_blocked"] = True
+        st.session_state["auth_cookie_delete_pending"] = True
         st.rerun()
 
 
