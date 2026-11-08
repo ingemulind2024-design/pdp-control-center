@@ -2718,7 +2718,6 @@ with st.sidebar:
             "Informe de Actividades",
             "Administrar OTs",
             "Agregar actividades Excel",
-            "Importar base",
             "Exportar reporte",
         ]
     else:
@@ -2776,7 +2775,6 @@ ADMIN_ONLY_PAGES = {
     "Informe de Actividades",
     "Administrar OTs",
     "Agregar actividades Excel",
-    "Importar base",
     "Exportar reporte",
 }
 
@@ -5605,7 +5603,12 @@ def _inc_fetch_all(client, table_name, columns):
 
 
 def _inc_prepare(excel_activities, db_ots, db_activities):
-    """Prepara un listado únicamente para INSERT; jamás UPSERT/DELETE/UPDATE."""
+    """Solo INSERT. EMERGENCIA es categoría sin OT numérica; nunca altera datos.
+
+    Los payloads incluyen _fila_excel únicamente en memoria para permitir
+    seleccionar actividades concretas. Este campo NO se envía a Supabase.
+    """
+    EMERGENCY_PENDING = "__PENDING_EMERGENCIA__"
     ot_map = {}
     ambiguous_ots = set()
     for record in db_ots:
@@ -5626,36 +5629,46 @@ def _inc_prepare(excel_activities, db_ots, db_activities):
     preview = []
     issues = 0
     duplicates = 0
+
     for row_index, (_, row) in enumerate(excel_activities.iterrows(), start=2):
         ot = _inc_text(row.get("ot"))
         code = _inc_text(row.get("codigo_actividad"))
         description = _inc_text(row.get("descripcion"))
         if not any([ot, code, description]):
             continue
-        entry = {"Fila Excel": row_index, "OT": ot, "Actividad": code,
-                 "Descripción": description, "Resultado": "", "Motivo": ""}
+        entry = {
+            "Fila Excel": row_index,
+            "OT": ot or "(VACÍA)",
+            "Actividad": code,
+            "Descripción": description,
+            "Resultado": "",
+            "Motivo": "",
+        }
+        ot_key = _inc_key(ot)
         if not ot or not code or not description:
             entry["Resultado"] = "REVISAR"
-            entry["Motivo"] = "Faltan OT, código o descripción"
+            entry["Motivo"] = "Faltan OT/categoría, código o descripción"
             issues += 1
-        elif _inc_key(ot) in ambiguous_ots:
+        elif ot_key in ambiguous_ots:
             entry["Resultado"] = "REVISAR"
-            entry["Motivo"] = "Número de OT duplicado en Supabase"
+            entry["Motivo"] = "Hay más de una referencia con ese nombre en Supabase"
             issues += 1
-        elif _inc_key(ot) not in ot_map:
+        elif ot_key not in ot_map and ot_key != "emergencia":
             entry["Resultado"] = "REVISAR"
             entry["Motivo"] = "La OT no existe; créala en Administrar OTs"
             issues += 1
         else:
-            ot_id = ot_map[_inc_key(ot)]
+            # Si es EMERGENCIA y no existe en OTs, se puede crear una
+            # referencia interna de agrupación justo antes de insertar.
+            ot_id = ot_map.get(ot_key, EMERGENCY_PENDING)
             key = (str(ot_id), _inc_key(code))
             if key in existing:
                 entry["Resultado"] = "EXISTE"
-                entry["Motivo"] = "No se modificará ni duplicará"
+                entry["Motivo"] = "No se modificará el registro ni su historial"
                 duplicates += 1
             elif key in seen_excel:
                 entry["Resultado"] = "DUPLICADA EN EXCEL"
-                entry["Motivo"] = "Ya se incluyó antes en este archivo"
+                entry["Motivo"] = "El código aparece repetido para la misma OT"
                 duplicates += 1
             else:
                 try:
@@ -5669,13 +5682,13 @@ def _inc_prepare(excel_activities, db_ots, db_activities):
                         "peso": _inc_decimal(row.get("peso"), 1.0, "peso", row_index),
                         "inicio_plan": _inc_date(row.get("inicio_plan"), "inicio_plan", row_index),
                         "fin_plan": _inc_date(row.get("fin_plan"), "fin_plan", row_index),
+                        "_fila_excel": row_index,
                     }
                     if payload["inicio_plan"] and payload["fin_plan"]:
                         if payload["fin_plan"] < payload["inicio_plan"]:
                             raise ValueError(
                                 f"Fila {row_index}: el fin planificado es anterior al inicio."
                             )
-                    # Estos campos solo se envían si existen en el Excel.
                     if "seccion" in excel_activities.columns:
                         payload["seccion"] = _inc_text(row.get("seccion"))
                     for numeric in ("personal", "duracion_h", "hh_plan"):
@@ -5686,13 +5699,24 @@ def _inc_prepare(excel_activities, db_ots, db_activities):
                     candidates.append(payload)
                     seen_excel.add(key)
                     entry["Resultado"] = "NUEVA"
-                    entry["Motivo"] = "Se agregará sin modificar los avances"
+                    if ot_id == EMERGENCY_PENDING:
+                        entry["Motivo"] = (
+                            "Emergencia sin OT numérica; se creará una categoría "
+                            "interna EMERGENCIA al confirmar"
+                        )
+                    elif ot_key == "emergencia":
+                        entry["Motivo"] = (
+                            "Se añadirá a EMERGENCIA, sin modificar datos anteriores"
+                        )
+                    else:
+                        entry["Motivo"] = "Solo se agregará; no se modificarán avances"
                 except ValueError as error:
                     entry["Resultado"] = "REVISAR"
                     entry["Motivo"] = str(error)
                     issues += 1
         preview.append(entry)
     return candidates, pd.DataFrame(preview), issues, duplicates
+
 
 
 def _inc_excel_backup(ot_rows, activity_rows, report_rows):
@@ -5716,29 +5740,28 @@ def _inc_excel_backup(ot_rows, activity_rows, report_rows):
 
 
 if page == "Agregar actividades Excel":
-    st.subheader("Agregar actividades desde Excel — sin reiniciar")
+    st.subheader("Agregar actividades — sin borrar nada")
     st.success(
-        "Esta función SOLO agrega las actividades nuevas. No elimina OTs, "
-        "no reemplaza actividades existentes y no modifica avances ni evidencias."
+        "Importación incremental: SOLO inserta actividades seleccionadas. "
+        "Nunca elimina, reemplaza o actualiza OTs, avances ni evidencias existentes."
     )
     st.caption(
-        "Utilice su Excel actualizado con la hoja `actividades`. Puede incluir "
-        "todas las filas originales: las que ya existen se ignorarán. "
-        "La hoja `ots` es opcional y NO se utiliza para modificar las OTs existentes."
+        "EMERGENCIA se acepta como categoría de actividades sin OT numérica. "
+        "No representa una orden de trabajo emitida por el cliente."
     )
 
     if supabase_admin is None:
         st.error(
-            "Para importar desde Excel debe existir [supabase_admin] key "
-            "en los Secrets de Streamlit."
+            "Falta configurar [supabase_admin] key en Secrets de Streamlit "
+            "para poder agregar actividades."
         )
     else:
-        st.markdown("#### Paso 1. Respaldo de seguridad")
+        st.markdown("#### 1. Respaldo de la base actual")
         st.caption(
-            "Descargue una copia de las OTs, actividades y avances ANTES de importar. "
-            "El respaldo contiene los datos y referencias a fotos; no los archivos de imagen."
+            "Descarga primero las OTs, actividades y avances. Las referencias "
+            "a fotografías estarán en el Excel, pero los archivos siguen en Storage."
         )
-        if st.button("Preparar respaldo de datos", key="inc_prepare_backup"):
+        if st.button("Preparar respaldo", key="inc_prepare_backup"):
             try:
                 backup_ots = _inc_fetch_all(supabase_admin, "ots", "*")
                 backup_activities = _inc_fetch_all(supabase_admin, "actividades", "*")
@@ -5752,10 +5775,10 @@ if page == "Agregar actividades Excel":
             except Exception as exc:
                 st.error(f"No se pudo preparar el respaldo: {exc}")
         if st.session_state.get("inc_backup_data"):
-            backup_counts = st.session_state["inc_backup_counts"]
+            b_counts = st.session_state["inc_backup_counts"]
             st.caption(
-                f"Respaldo: {backup_counts[0]} OTs, "
-                f"{backup_counts[1]} actividades y {backup_counts[2]} reportes."
+                f"Respaldo: {b_counts[0]} OTs, {b_counts[1]} actividades "
+                f"y {b_counts[2]} reportes registrados."
             )
             st.download_button(
                 "📥 Descargar respaldo Excel",
@@ -5765,15 +5788,16 @@ if page == "Agregar actividades Excel":
                 key="inc_backup_download",
             )
 
-        st.markdown("#### Paso 2. Seleccione el Excel actualizado")
+        st.markdown("#### 2. Carga tu Excel actualizado")
         file = st.file_uploader(
-            "Archivo Excel con las actividades faltantes",
-            type=["xlsx"],
-            key="incremental_excel_upload_v33",
+            "Archivo Excel con la hoja actividades", type=["xlsx"],
+            key="incremental_excel_upload_v34",
         )
         if file is not None:
             try:
-                workbook = pd.ExcelFile(io.BytesIO(file.getvalue()))
+                file_bytes = file.getvalue()
+                file_id = hashlib.sha256(file_bytes).hexdigest()[:12]
+                workbook = pd.ExcelFile(io.BytesIO(file_bytes))
                 sheets = {sheet.strip().lower(): sheet for sheet in workbook.sheet_names}
                 if "actividades" not in sheets:
                     raise ValueError("El Excel debe incluir una hoja llamada 'actividades'.")
@@ -5785,7 +5809,7 @@ if page == "Agregar actividades Excel":
                 required = {"ot", "codigo_actividad", "descripcion"}
                 if not required.issubset(source_df.columns):
                     raise ValueError(
-                        "Faltan columnas obligatorias: "
+                        "Faltan las columnas obligatorias: "
                         + ", ".join(sorted(required - set(source_df.columns)))
                     )
 
@@ -5798,66 +5822,156 @@ if page == "Agregar actividades Excel":
                 )
                 p1, p2, p3, p4 = st.columns(4)
                 p1.metric("Filas revisadas", len(review))
-                p2.metric("Nuevas actividades", len(new_rows))
-                p3.metric("Ya existentes / duplicadas", duplicates)
-                p4.metric("Filas por corregir", issues)
+                p2.metric("Nuevas disponibles", len(new_rows))
+                p3.metric("Existentes / duplicadas", duplicates)
+                p4.metric("Otras filas para revisar", issues)
 
                 if not review.empty:
-                    st.dataframe(review, hide_index=True, use_container_width=True)
+                    with st.expander("Ver revisión completa del Excel", expanded=bool(issues)):
+                        st.dataframe(review, hide_index=True, use_container_width=True)
                 if issues:
-                    st.error(
-                        "Corrija las filas marcadas REVISAR y cargue el archivo corregido. "
-                        "La importación está deshabilitada para evitar omisiones."
+                    st.warning(
+                        f"Hay {issues} fila(s) por corregir. NO se incorporarán. "
+                        "Puedes seleccionar las filas válidas por separado."
                     )
-                elif not new_rows:
-                    st.info("No hay actividades nuevas. No se realizará ningún cambio.")
+                if not new_rows:
+                    st.info("No se detectaron actividades nuevas para agregar.")
                 else:
-                    st.info(
-                        "Los nuevos registros tendrán inicialmente 0% de avance. "
-                        "Por eso, el avance general y la Curva S pueden cambiar, "
-                        "pero los reportes y fotos históricos se conservan."
+                    st.markdown("#### 3. Selecciona solamente las actividades que faltan")
+                    st.caption(
+                        "**Ninguna está seleccionada inicialmente.** Marca la casilla "
+                        "Agregar únicamente en las actividades que quieres incorporar. "
+                        "Las ya existentes no aparecen aquí porque se conservarán."
                     )
+                    selectable = review.loc[review["Resultado"] == "NUEVA"].copy()
+                    selectable.insert(0, "Agregar", False)
+                    editor = st.data_editor(
+                        selectable[
+                            ["Agregar", "Fila Excel", "OT", "Actividad", "Descripción", "Motivo"]
+                        ],
+                        column_config={
+                            "Agregar": st.column_config.CheckboxColumn(
+                                "Agregar", help="Marca solo la actividad faltante", default=False,
+                                required=True,
+                            ),
+                        },
+                        disabled=["Fila Excel", "OT", "Actividad", "Descripción", "Motivo"],
+                        hide_index=True,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        key=f"inc_select_v34_{file_id}",
+                    )
+                    selected_row_numbers = set(
+                        editor.loc[editor["Agregar"].fillna(False), "Fila Excel"].astype(int).tolist()
+                    )
+                    selected_payloads = [
+                        p for p in new_rows if p.get("_fila_excel") in selected_row_numbers
+                    ]
+                    st.info(
+                        f"**{len(selected_payloads)} actividad(es) seleccionada(s)** "
+                        f"de {len(new_rows)} disponibles."
+                    )
+                    create_emergency = any(
+                        p.get("ot_id") == "__PENDING_EMERGENCIA__"
+                        for p in selected_payloads
+                    )
+                    if create_emergency:
+                        st.warning(
+                            "Entre las seleccionadas hay actividades EMERGENCIA. "
+                            "Como no tienen OT numérica, se creará una ÚNICA referencia "
+                            "interna 'EMERGENCIA' en la tabla OTs (si aún no existe). "
+                            "Esto NO modifica ninguna OT previa."
+                        )
+
                     confirm = st.checkbox(
-                        f"Confirmo agregar únicamente {len(new_rows)} "
-                        "actividades nuevas, sin reemplazar información existente.",
-                        key="inc_confirm_v33",
+                        "Confirmo que deseo INSERTAR solamente las filas marcadas, "
+                        "manteniendo intactos los reportes, fotos y actividades existentes.",
+                        key=f"inc_confirm_v34_{file_id}",
                     )
                     if st.button(
-                        "✅ AGREGAR SOLO ACTIVIDADES NUEVAS",
+                        "✅ AGREGAR SOLO LAS ACTIVIDADES SELECCIONADAS",
                         type="primary", use_container_width=True,
-                        disabled=not confirm,
-                        key="inc_import_v33",
+                        disabled=(not confirm or not selected_payloads),
+                        key="inc_import_v34",
                     ):
-                        # Segunda verificación al momento del guardado para evitar
-                        # duplicados si otro usuario añadió actividades recientemente.
+                        # Releer datos en el instante de guardar para evitar
+                        # insert duplicados si otro usuario cargó el mismo Excel.
                         fresh_ots = _inc_fetch_all(supabase_admin, "ots", "id,ot")
                         fresh_activities = _inc_fetch_all(
                             supabase_admin, "actividades", "id,ot_id,codigo_actividad"
                         )
-                        validated, _, new_issues, _ = _inc_prepare(
+                        validated, _, _, _ = _inc_prepare(
                             source_df, fresh_ots, fresh_activities
                         )
-                        if new_issues:
-                            st.error(
-                                "La base cambió o el archivo contiene errores. "
-                                "Actualice la página y valide de nuevo."
+                        validated = [
+                            p for p in validated if p.get("_fila_excel") in selected_row_numbers
+                        ]
+                        already_present = len(selected_payloads) - len(validated)
+
+                        if not validated:
+                            st.info(
+                                "Las actividades seleccionadas ya existen o ahora requieren revisión; "
+                                "no se insertó ninguna."
                             )
-                        elif not validated:
-                            st.info("Las actividades ya existen; no se insertó nada.")
                         else:
+                            # Solo la categoría EMERGENCIA puede requerir alta.
+                            if any(p["ot_id"] == "__PENDING_EMERGENCIA__" for p in validated):
+                                existing_emergencies = [
+                                    r for r in fresh_ots
+                                    if _inc_key(r.get("ot")) == "emergencia"
+                                ]
+                                if len(existing_emergencies) > 1:
+                                    st.error(
+                                        "Existen referencias EMERGENCIA duplicadas. "
+                                        "No se agregó nada: revise esas OTs primero."
+                                    )
+                                    st.stop()
+                                if not existing_emergencies:
+                                    try:
+                                        supabase_admin.table("ots").insert({
+                                            "ot": "EMERGENCIA",
+                                            "equipo": "TRABAJOS DE EMERGENCIA",
+                                            "descripcion": "Agrupación interna: actividades sin OT numérica",
+                                            "activo": True,
+                                        }).execute()
+                                    except Exception as error:
+                                        st.error(
+                                            "No se pudo crear la agrupación EMERGENCIA: "
+                                            f"{error}. No se importaron esas actividades."
+                                        )
+                                        st.stop()
+
+                                # Verificación nueva con el id real, antes de insertar.
+                                fresh_ots = _inc_fetch_all(supabase_admin, "ots", "id,ot")
+                                refreshed, _, _, _ = _inc_prepare(
+                                    source_df, fresh_ots, fresh_activities
+                                )
+                                validated = [
+                                    p for p in refreshed
+                                    if p.get("_fila_excel") in selected_row_numbers
+                                ]
+                                if any(p["ot_id"] == "__PENDING_EMERGENCIA__" for p in validated):
+                                    st.error(
+                                        "No se pudo confirmar la referencia EMERGENCIA; "
+                                        "la importación se detuvo."
+                                    )
+                                    st.stop()
+
                             successes = 0
                             failures = []
-                            progress_widget = st.progress(0, text="Agregando actividades...")
-                            # Inserción individual: si falla una actividad, no afecta
-                            # las demás y permite identificar el código exacto.
-                            for index, payload in enumerate(validated, start=1):
+                            progress_widget = st.progress(0, text="Agregando solo seleccionadas...")
+                            for index, raw_payload in enumerate(validated, start=1):
+                                payload = {
+                                    k: v for k, v in raw_payload.items()
+                                    if k != "_fila_excel"
+                                }
                                 try:
                                     supabase_admin.table("actividades").insert(payload).execute()
                                     successes += 1
                                 except Exception as exc:
                                     failures.append(
-                                        f"{payload['codigo_actividad']} / "
-                                        f"OT ID {payload['ot_id']}: {exc}"
+                                        f"Fila {raw_payload.get('_fila_excel')} · "
+                                        f"{payload.get('codigo_actividad')} · {exc}"
                                     )
                                 progress_widget.progress(
                                     index / len(validated),
@@ -5867,20 +5981,24 @@ if page == "Agregar actividades Excel":
                             st.cache_data.clear()
                             if successes:
                                 st.success(
-                                    f"Se agregaron {successes} actividades nuevas. "
-                                    "Los avances y fotos existentes no se modificaron."
+                                    f"✅ Se agregaron {successes} actividad(es). "
+                                    "Las actividades anteriores, avances y fotos no se modificaron."
+                                )
+                            if already_present:
+                                st.info(
+                                    f"{already_present} actividad(es) seleccionada(s) "
+                                    "no se importaron porque ya existen o requieren revisión."
                                 )
                             if failures:
                                 st.error(
-                                    f"No se pudieron agregar {len(failures)} actividades. "
-                                    "Revise el detalle y vuelva a importar el mismo Excel; "
-                                    "las actividades ya insertadas se omitirán."
+                                    f"Hubo {len(failures)} error(es). Ningún registro "
+                                    "existente fue borrado ni actualizado."
                                 )
                                 with st.expander("Ver errores de importación"):
                                     for item in failures:
                                         st.write(item)
             except Exception as exc:
-                st.error(f"No fue posible revisar el Excel: {exc}")
+                st.error(f"No fue posible revisar o importar el Excel: {exc}")
 
 
 # ============================================================
