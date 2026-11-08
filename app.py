@@ -2728,26 +2728,81 @@ def _sup_report_text(value, default="-"):
     return clean if clean else default
 
 
+def _sup_time(value):
+    """Fechas del cronograma: las fechas sin zona se interpretan en hora de mina.
+
+    Las marcas de tiempo con zona horaria se convierten a America/Lima.
+    """
+    try:
+        value = pd.to_datetime(value, errors="coerce")
+        if pd.isna(value):
+            return pd.NaT
+        if getattr(value, "tzinfo", None) is not None:
+            value = value.tz_convert(LIMA_TZ).tz_localize(None)
+        return value
+    except (ValueError, TypeError, OverflowError):
+        return pd.NaT
+
+
+def _sup_plan_at(start, finish, now):
+    """Plan lineal 0-100 por cronograma, consistente con la Curva S."""
+    if pd.isna(start) or pd.isna(finish):
+        return float("nan")
+    if finish <= start:
+        finish = start + pd.Timedelta(minutes=1)
+    if now <= start:
+        return 0.0
+    if now >= finish:
+        return 100.0
+    return max(0.0, min(100.0, 100 * (now - start).total_seconds() / (finish - start).total_seconds()))
+
+
+def _sup_pdf_status(real, start, finish, now):
+    if real >= 100:
+        return "Culminada"
+    if pd.notna(finish) and now > finish:
+        return "Vencida"
+    if real > 0:
+        return "En ejecución"
+    if pd.notna(start) and now < start:
+        return "Por iniciar"
+    if pd.isna(start) and pd.isna(finish):
+        return "Sin programación"
+    return "No iniciada"
+
+
 def _supervisor_report_model(
     selected_activities: pd.DataFrame,
     all_ots: pd.DataFrame,
     all_progress: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Solo lectura: no recalcula ni altera lo que ya existe en Supabase."""
+    """Modelo de consulta para reportes; solo lectura de Supabase.
+
+    El cálculo de plan replica el avance lineal empleado por la Curva S.
+    No modifica ni sobrescribe los avances registrados.
+    """
     result = build_activity_status(selected_activities, all_progress).copy()
     if result.empty:
         return result
     result["id"] = result["id"].astype(str)
     result["ot_id"] = result["ot_id"].astype(str)
-    result["avance_real"] = pd.to_numeric(result["avance_real"], errors="coerce").fillna(0).clip(0, 100)
-    result["supervisor"] = result.get("supervisor", pd.Series("", index=result.index)).fillna("SIN ASIGNAR").astype(str).str.strip().replace("", "SIN ASIGNAR")
+    result["avance_real"] = pd.to_numeric(
+        result["avance_real"], errors="coerce"
+    ).fillna(0).clip(0, 100)
+    result["supervisor"] = (
+        result.get("supervisor", pd.Series("", index=result.index))
+        .fillna("SIN ASIGNAR").astype(str).str.strip().replace("", "SIN ASIGNAR")
+    )
+    # Se conserva el estado utilizado por los filtros existentes.
     result["estado"] = result["avance_real"].apply(
         lambda p: "Culminada" if p >= 100 else ("En ejecución" if p > 0 else "No iniciada")
     )
     result["hh_plan_calc"] = pd.to_numeric(
         result.get("hh_plan", pd.Series(0, index=result.index)), errors="coerce"
     ).fillna(0).clip(lower=0)
-    result["hh_ganadas_calc"] = (result["hh_plan_calc"] * result["avance_real"] / 100).round(2)
+    result["hh_ganadas_calc"] = (
+        result["hh_plan_calc"] * result["avance_real"] / 100
+    ).round(2)
     result["n_reportes"] = 0
     result["ultimo_reporte"] = "Sin reporte"
 
@@ -2758,148 +2813,266 @@ def _supervisor_report_model(
         result["n_reportes"] = result["id"].map(counts).fillna(0).astype(int)
         if "fecha_registro" in p.columns:
             p["fecha_orden"] = pd.to_datetime(p["fecha_registro"], errors="coerce", utc=True)
-            latest = p.sort_values("fecha_orden", kind="stable").groupby("actividad_id", sort=False).tail(1)
+            latest = (
+                p.sort_values("fecha_orden", kind="stable")
+                .groupby("actividad_id", sort=False).tail(1)
+            )
             shown = latest.set_index("actividad_id")["fecha_orden"]
             dates = pd.to_datetime(result["id"].map(shown), utc=True, errors="coerce")
-            result["ultimo_reporte"] = dates.dt.tz_convert(LIMA_TZ).dt.strftime("%d/%m/%Y %H:%M").fillna("Sin reporte")
-    if "id" in all_ots.columns and "ot" in all_ots.columns:
-        ot_catalog = all_ots[["id", "ot"]].copy()
-        ot_catalog["id"] = ot_catalog["id"].astype(str)
-        ot_catalog = ot_catalog.drop_duplicates("id")
-        result = result.merge(ot_catalog.rename(columns={"id":"ot_id", "ot":"numero_ot"}), on="ot_id", how="left", suffixes=("", "_ot"))
+            result["ultimo_reporte"] = (
+                dates.dt.tz_convert(LIMA_TZ).dt.strftime("%d/%m/%Y %H:%M").fillna("Sin reporte")
+            )
+
+    if {"id", "ot"}.issubset(all_ots.columns):
+        catalog_cols = [col for col in ("id", "ot", "equipo") if col in all_ots.columns]
+        catalog = all_ots[catalog_cols].copy()
+        catalog["id"] = catalog["id"].astype(str)
+        catalog = catalog.drop_duplicates("id")
+        catalog = catalog.rename(columns={
+            "id": "ot_id", "ot": "numero_ot", "equipo": "equipo_de_ot"
+        })
+        result = result.merge(catalog, on="ot_id", how="left", suffixes=("", "_catalogo"))
+
     if "numero_ot" not in result.columns:
         result["numero_ot"] = "S/OT"
     result["numero_ot"] = result["numero_ot"].fillna("S/OT").astype(str)
-    result["descripcion_avance"] = result.get("descripcion_avance", pd.Series("", index=result.index)).fillna("").astype(str)
-    result["codigo_actividad"] = result.get("codigo_actividad", pd.Series("", index=result.index)).fillna("").astype(str)
-    result["descripcion"] = result.get("descripcion", pd.Series("", index=result.index)).fillna("").astype(str)
+    if "equipo" not in result.columns:
+        result["equipo"] = result.get("equipo_de_ot", pd.Series("-", index=result.index))
+    elif "equipo_de_ot" in result.columns:
+        equipment = result["equipo"].fillna("").astype(str).str.strip()
+        result["equipo"] = equipment.where(equipment.ne(""), result["equipo_de_ot"])
+    result["equipo"] = result["equipo"].fillna("-").astype(str)
+
+    now = pd.Timestamp.now(tz=LIMA_TZ).tz_localize(None)
+    for col in ("inicio_plan", "fin_plan"):
+        if col not in result.columns:
+            result[col] = pd.NaT
+    result["inicio_plan_pdf"] = result["inicio_plan"].map(_sup_time)
+    result["fin_plan_pdf"] = result["fin_plan"].map(_sup_time)
+    result["avance_plan_actual"] = result.apply(
+        lambda row: _sup_plan_at(row["inicio_plan_pdf"], row["fin_plan_pdf"], now),
+        axis=1,
+    )
+    result["brecha_pp"] = result["avance_real"] - result["avance_plan_actual"]
+    result["estado_pdf"] = result.apply(
+        lambda row: _sup_pdf_status(
+            row["avance_real"], row["inicio_plan_pdf"], row["fin_plan_pdf"], now
+        ), axis=1,
+    )
+    for col in ("descripcion_avance", "codigo_actividad", "descripcion"):
+        result[col] = result.get(col, pd.Series("", index=result.index)).fillna("").astype(str)
     return result.sort_values(["supervisor", "numero_ot", "codigo_actividad"], kind="stable")
 
 
 def build_supervisor_summary_pdf(report_df: pd.DataFrame, supervisor_label: str) -> bytes:
-    """PDF consolidado con carátula gerencial y detalle de actividades.
+    """Reporte A4 horizontal siguiendo el modelo PDP Quellaveco suministrado.
 
-    Diseño compacto A4 horizontal, sin modificar datos ni exigir dependencias extra.
+    Solo indicadores y tabla de actividades (sin anexo de últimos avances).
     """
-    buffer = io.BytesIO()
-    navy = colors.HexColor("#0D345E")
-    ocean = colors.HexColor("#166099")
-    white = colors.white
-    slate = colors.HexColor("#526579")
-    faint = colors.HexColor("#EEF4F9")
-    border = colors.HexColor("#D7E2EC")
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=28, rightMargin=28, topMargin=26, bottomMargin=26)
-    sheet = getSampleStyleSheet()
-    tiny = ParagraphStyle("sup_tiny", parent=sheet["Normal"], fontName="Helvetica", fontSize=7.1, leading=9.3, textColor=navy)
-    small = ParagraphStyle("sup_small", parent=sheet["Normal"], fontName="Helvetica", fontSize=8.2, leading=11, textColor=navy)
-    heading = ParagraphStyle("sup_heading", parent=sheet["Heading2"], fontName="Helvetica-Bold", fontSize=13, leading=16, textColor=navy, spaceAfter=8)
-    title = ParagraphStyle("sup_title", parent=sheet["Heading1"], fontName="Helvetica-Bold", fontSize=17, leading=21, textColor=navy, spaceAfter=10)
-
-    def safe(value, limit=None):
-        content = html.escape(_sup_report_text(value, ""), quote=False).replace("\n", "<br/>")
-        if limit and len(content) > limit:
-            content = content[:limit].rsplit(" ", 1)[0] + "..."
-        return content or "-"
-
     if report_df.empty:
         raise ValueError("No hay actividades para generar el reporte.")
 
-    n = len(report_df)
-    finished = int((report_df["avance_real"] >= 100).sum())
-    active = int(((report_df["avance_real"] > 0) & (report_df["avance_real"] < 100)).sum())
-    pending = int((report_df["avance_real"] <= 0).sum())
-    reported = int((report_df["n_reportes"] > 0).sum())
-    progress_pct = float(report_df["avance_real"].mean())
+    buffer = io.BytesIO()
+    navy = colors.HexColor("#0C3158")
+    pale = colors.HexColor("#EAF1F8")
+    border = colors.HexColor("#C8D1D9")
+    white = colors.white
+    ink = colors.HexColor("#192C40")
+    grey = colors.HexColor("#5C6E82")
+    green = colors.HexColor("#E7F5EE")
+    red = colors.HexColor("#FCE9E9")
+    amber = colors.HexColor("#FFF3D8")
+    blue_light = colors.HexColor("#E8F2FC")
+    page_width, _ = landscape(A4)
+    document = SimpleDocTemplate(
+        buffer, pagesize=landscape(A4),
+        leftMargin=27, rightMargin=27, topMargin=12, bottomMargin=30,
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "mainin36_title", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=16, leading=19, textColor=navy, alignment=1, spaceAfter=2,
+    )
+    subtitle_style = ParagraphStyle(
+        "mainin36_subtitle", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=8.6, leading=12, textColor=grey, alignment=1,
+    )
+    section_style = ParagraphStyle(
+        "mainin36_section", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=10.5, leading=13, textColor=navy,
+    )
+    label_style = ParagraphStyle(
+        "mainin36_label", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=7.5, leading=10, textColor=ink,
+    )
+    body_style = ParagraphStyle(
+        "mainin36_body", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=7.6, leading=10, textColor=ink,
+    )
+    metric_head = ParagraphStyle(
+        "mainin36_metric_head", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=7.5, leading=10, textColor=white, alignment=1,
+    )
+    metric_subhead = ParagraphStyle(
+        "mainin36_metric_subhead", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=7.6, leading=10, textColor=grey, alignment=1,
+    )
+    metric_number = ParagraphStyle(
+        "mainin36_metric_number", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=9.2, leading=12, textColor=ink, alignment=1,
+    )
+    table_head = ParagraphStyle(
+        "mainin36_table_head", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=7, leading=8.5, textColor=white,
+    )
+    table_cell = ParagraphStyle(
+        "mainin36_table_cell", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=6.4, leading=8.2, textColor=ink,
+    )
+    table_cell_small = ParagraphStyle(
+        "mainin36_table_cell_small", parent=table_cell, fontSize=6.1, leading=7.8,
+    )
+    table_cell_center = ParagraphStyle(
+        "mainin36_table_center", parent=table_cell, alignment=1,
+    )
+
+    def para(value, sty=table_cell):
+        content = html.escape(_sup_report_text(value, "-"), quote=False)
+        # Avoid injecting markup; the text is always a user-entered data field.
+        return Paragraph(content.replace("\n", "<br/>"), sty)
+
+    def number_pct(value):
+        return "N/D" if pd.isna(value) else f"{float(value):.1f}%"
+
+    def brief_date(value):
+        val = _sup_time(value)
+        if pd.isna(val):
+            return "-"
+        return val.strftime("%d/%m %H:%M")
+
+    def fmt_hh(value):
+        value = float(value)
+        return f"{value:,.0f}" if value.is_integer() else f"{value:,.1f}"
+
+    total = len(report_df)
+    culminadas = int((report_df["avance_real"] >= 100).sum())
+    en_ejecucion = int(((report_df["avance_real"] > 0) & (report_df["avance_real"] < 100)).sum())
+    no_iniciadas = int((report_df["avance_real"] <= 0).sum())
+    pendientes = int((report_df["avance_real"] < 100).sum())
+    plan_vals = pd.to_numeric(report_df["avance_plan_actual"], errors="coerce")
+    valid_plan = plan_vals.notna()
+    plan_now = float(plan_vals[valid_plan].mean()) if valid_plan.any() else float("nan")
+    real_now = float(report_df["avance_real"].mean())
+    gap = real_now - plan_now if pd.notna(plan_now) else float("nan")
+    spi = real_now / plan_now if pd.notna(plan_now) and plan_now > 0 else float("nan")
     hh_plan = float(report_df["hh_plan_calc"].sum())
-    hh_done = float(report_df["hh_ganadas_calc"].sum())
+    hh_ganadas = float(report_df["hh_ganadas_calc"].sum())
+
     story = [
-        Paragraph("MAININ · UNIDAD MINERA ANTAPACCAY · MECÁNICA", small),
-        Spacer(1, 9),
-        Paragraph("REPORTE DE ACTIVIDADES POR SUPERVISOR", title),
-        Paragraph(f"<b>Supervisor:</b> {safe(supervisor_label)} &nbsp;&nbsp;&nbsp; <b>Fecha de emisión:</b> {pd.Timestamp.now(tz=LIMA_TZ):%d/%m/%Y %H:%M}", small),
-        Spacer(1, 14),
+        Paragraph("PDP CONTROL CENTER ANTAPACCAY - MAININ", title_style),
+        Paragraph("Reporte de desempeño por supervisor", subtitle_style),
+        Spacer(1, 12),
     ]
+    meta = [
+        [para("Área", label_style), para("Mecánica", body_style),
+         para("Supervisor", label_style), para(supervisor_label, body_style)],
+        [para("Fecha de emisión", label_style),
+         para(pd.Timestamp.now(tz=LIMA_TZ).strftime("%d/%m/%Y %H:%M"), body_style),
+         para("Tipo de reporte", label_style), para("KPIs y actividades", body_style)],
+    ]
+    meta_table = Table(meta, colWidths=[89,302,98,299], hAlign="CENTER")
+    meta_table.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),.38,border),
+        ("BACKGROUND",(0,0),(0,-1),pale),
+        ("BACKGROUND",(2,0),(2,-1),pale),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("LEFTPADDING",(0,0),(-1,-1),7), ("RIGHTPADDING",(0,0),(-1,-1),5),
+        ("TOPPADDING",(0,0),(-1,-1),6), ("BOTTOMPADDING",(0,0),(-1,-1),6),
+    ]))
+    story += [meta_table, Spacer(1,17), Paragraph("Indicadores del supervisor", section_style), Spacer(1,7)]
+
+    kpi_head1 = ["OTs", "Actividades", "Plan actual", "Avance real", "Brecha", "SPI"]
+    kpi_values1 = [
+        str(report_df["numero_ot"].nunique()), str(total), number_pct(plan_now),
+        number_pct(real_now), f"{gap:+.1f} pp" if pd.notna(gap) else "N/D",
+        f"{spi:.2f}" if pd.notna(spi) else "N/D",
+    ]
+    kpi_head2 = ["Culminadas", "En ejecución", "No iniciadas", "HH plan", "HH ganadas", "Pendientes"]
+    kpi_values2 = [str(culminadas), str(en_ejecucion), str(no_iniciadas),
+                   fmt_hh(hh_plan), fmt_hh(hh_ganadas), str(pendientes)]
     metrics = [
-        ("OTs", f'{report_df["numero_ot"].nunique()}'),
-        ("Actividades", f"{n}"),
-        ("Avance", f"{progress_pct:.1f}%"),
-        ("Culminadas", f"{finished}"),
-        ("En ejecución", f"{active}"),
-        ("No iniciadas", f"{pending}"),
-        ("Con reporte", f"{reported}/{n}"),
+        [para(s, metric_head) for s in kpi_head1],
+        [para(s, metric_number) for s in kpi_values1],
+        [para(s, metric_subhead) for s in kpi_head2],
+        [para(s, metric_number) for s in kpi_values2],
     ]
-    cells = [[Paragraph(f"<b>{safe(label)}</b><br/><font size='12'>{safe(value)}</font>", small) for label, value in metrics]]
-    table = Table(cells, colWidths=[112]*7)
-    table.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,-1),faint), ("BOX",(0,0),(-1,-1),.6,border),
-        ("INNERGRID",(0,0),(-1,-1),.5,border),
-        ("TOPPADDING",(0,0),(-1,-1),12),("BOTTOMPADDING",(0,0),(-1,-1),12),
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
+    metric_table = Table(metrics, colWidths=[788/6]*6, hAlign="CENTER")
+    metric_table.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),.36,border),
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("BACKGROUND",(0,2),(-1,2),pale),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("TOPPADDING",(0,0),(-1,0),7), ("BOTTOMPADDING",(0,0),(-1,0),7),
+        ("TOPPADDING",(0,1),(-1,1),8), ("BOTTOMPADDING",(0,1),(-1,1),8),
+        ("TOPPADDING",(0,2),(-1,2),6), ("BOTTOMPADDING",(0,2),(-1,2),6),
+        ("TOPPADDING",(0,3),(-1,3),8), ("BOTTOMPADDING",(0,3),(-1,3),8),
     ]))
-    story += [table, Spacer(1,10), Paragraph(f"<b>HH planificadas:</b> {hh_plan:,.1f} &nbsp;&nbsp; <b>HH ganadas:</b> {hh_done:,.1f} &nbsp;&nbsp; <b>Cobertura de reporte:</b> {(100*reported/n):.1f}%", small), Spacer(1,18), Paragraph("DETALLE DE ACTIVIDADES", heading)]
+    story += [metric_table, Spacer(1,18), Paragraph("Detalle de actividades", section_style), Spacer(1,7)]
 
-    headers = ["OT", "Código", "Descripción de actividad", "Grupo", "Avance", "Estado", "HH plan", "Último reporte"]
-    rows = [[Paragraph(f"<b>{x}</b>", tiny) for x in headers]]
-    for _, row in report_df.iterrows():
+    headers = ["OT", "Equipo", "Grupo", "Descripción", "Plan", "Real", "Brecha", "Estado", "Inicio", "Fin"]
+    rows = [[para(h, table_head) for h in headers]]
+    row_status = []
+    for _, rec in report_df.iterrows():
+        plan_value = rec.get("avance_plan_actual", float("nan"))
+        brecha_value = rec.get("brecha_pp", float("nan"))
+        real_value = float(rec.get("avance_real", 0))
+        state = _sup_report_text(rec.get("estado_pdf"), "No iniciada")
         rows.append([
-            Paragraph(safe(row.get("numero_ot"),32), tiny),
-            Paragraph(safe(row.get("codigo_actividad"),30), tiny),
-            Paragraph(safe(row.get("descripcion"),170), tiny),
-            Paragraph(safe(row.get("grupo"),37), tiny),
-            Paragraph(f'{float(row.get("avance_real",0)):.1f}%', tiny),
-            Paragraph(safe(row.get("estado"),26), tiny),
-            Paragraph(f'{float(row.get("hh_plan_calc",0)):.1f}', tiny),
-            Paragraph(safe(row.get("ultimo_reporte"),24), tiny),
+            para(rec.get("numero_ot"), table_cell_small),
+            para(rec.get("equipo"), table_cell_small),
+            para(rec.get("grupo"), table_cell_small),
+            para(rec.get("descripcion"), table_cell_small),
+            para(number_pct(plan_value), table_cell_center),
+            para(number_pct(real_value), table_cell_center),
+            para(f"{float(brecha_value):+.1f}" if pd.notna(brecha_value) else "N/D", table_cell_center),
+            para(state, table_cell_small),
+            para(brief_date(rec.get("inicio_plan_pdf")), table_cell_small),
+            para(brief_date(rec.get("fin_plan_pdf")), table_cell_small),
         ])
-    detail = Table(rows, colWidths=[74,65,250,60,54,80,55,130], repeatRows=1, hAlign="LEFT")
-    detail.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),navy),
-        ("TEXTCOLOR",(0,0),(-1,0),white),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1),[white,faint]),
-        ("LINEBELOW",(0,0),(-1,0),.8,ocean),
-        ("INNERGRID",(0,0),(-1,-1),.25,border),
-        ("BOX",(0,0),(-1,-1),.5,border),
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),5),
-        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
-    ]))
-    # The header text itself is white, not only the table cell's default text.
-    rows[0] = [Paragraph(f'<font color="#FFFFFF"><b>{x}</b></font>',tiny) for x in headers]
-    # Update existing cell text; Table receives the same rows object.
-    for i, val in enumerate(rows[0]):
-        detail._cellvalues[0][i] = val
-    story.append(detail)
-    story.extend([Spacer(1,16), Paragraph("ÚLTIMOS AVANCES REGISTRADOS", heading)])
-    last_rows = [[Paragraph('<font color="#FFFFFF"><b>OT / Actividad</b></font>',tiny), Paragraph('<font color="#FFFFFF"><b>Descripción del último avance</b></font>',tiny), Paragraph('<font color="#FFFFFF"><b>Fecha</b></font>',tiny)]]
-    for _, row in report_df.iterrows():
-        last_rows.append([
-            Paragraph(safe(f'{row.get("numero_ot", "")} · {row.get("codigo_actividad", "")}',48),tiny),
-            Paragraph(safe(row.get("descripcion_avance", ""),460), tiny),
-            Paragraph(safe(row.get("ultimo_reporte"),25),tiny),
-        ])
-    last_table = Table(last_rows, colWidths=[155,493,120], repeatRows=1, hAlign="LEFT")
-    last_table.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),navy),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1),[white,faint]),
-        ("BOX",(0,0),(-1,-1),.5,border),
-        ("INNERGRID",(0,0),(-1,-1),.25,border),
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),5),
-        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
-    ]))
-    story.append(last_table)
+        row_status.append(state)
 
-    def page_footer(canvas, document):
+    widths = [66,90,51,208,48,49,48,74,77,77]
+    detail = Table(rows, colWidths=widths, repeatRows=1, hAlign="CENTER", splitByRow=1)
+    detail_styles = [
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[white, colors.HexColor("#F7F9FB")]),
+        ("GRID",(0,0),(-1,-1),.28,border),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("LEFTPADDING",(0,0),(-1,-1),5), ("RIGHTPADDING",(0,0),(-1,-1),4),
+        ("TOPPADDING",(0,0),(-1,0),7), ("BOTTOMPADDING",(0,0),(-1,0),7),
+        ("TOPPADDING",(0,1),(-1,-1),5), ("BOTTOMPADDING",(0,1),(-1,-1),5),
+    ]
+    for i, state in enumerate(row_status, start=1):
+        if state == "Culminada":
+            fill = green
+        elif state == "Vencida":
+            fill = red
+        elif state == "En ejecución":
+            fill = amber
+        else:
+            fill = blue_light
+        detail_styles.append(("BACKGROUND",(7,i),(7,i),fill))
+    detail.setStyle(TableStyle(detail_styles))
+    story.append(detail)
+
+    def footer(canvas, doc):
         canvas.saveState()
-        width, _ = landscape(A4)
-        canvas.setStrokeColor(border)
-        canvas.line(28,21,width-28,21)
-        canvas.setFont("Helvetica",7)
-        canvas.setFillColor(slate)
-        canvas.drawString(28,11,"MAININ · Antapaccay · Reporte de supervisión mecánica")
-        canvas.drawRightString(width-28,11,f"Página {document.page}")
+        canvas.setFont("Helvetica", 7.8)
+        canvas.setFillColor(grey)
+        canvas.drawCentredString(page_width / 2, 17, "MAININ - PDP Control Center Antapaccay · Mecánica")
         canvas.restoreState()
-    doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
+
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
     return buffer.getvalue()
 
 
@@ -4461,13 +4634,18 @@ if page == "Reporte por supervisor":
                 st.plotly_chart(fig, use_container_width=True)
             st.markdown("### Relación de actividades")
             columns = [
-                "numero_ot", "codigo_actividad", "descripcion", "grupo", "supervisor",
-                "avance_real", "estado", "hh_plan_calc", "hh_ganadas_calc", "n_reportes", "ultimo_reporte", "descripcion_avance",
+                "numero_ot", "equipo", "grupo", "codigo_actividad", "descripcion",
+                "avance_plan_actual", "avance_real", "brecha_pp", "estado_pdf",
+                "inicio_plan", "fin_plan", "supervisor",
+                "hh_plan_calc", "hh_ganadas_calc", "n_reportes", "ultimo_reporte", "descripcion_avance",
             ]
             labels = {
-                "numero_ot":"OT", "codigo_actividad":"Actividad", "descripcion":"Descripción",
-                "grupo":"Grupo", "supervisor":"Supervisor", "avance_real":"Avance (%)",
-                "estado":"Estado", "hh_plan_calc":"HH plan", "hh_ganadas_calc":"HH ganadas",
+                "numero_ot":"OT", "equipo":"Equipo", "grupo":"Grupo",
+                "codigo_actividad":"Actividad", "descripcion":"Descripción",
+                "avance_plan_actual":"Plan (%)", "avance_real":"Real (%)",
+                "brecha_pp":"Brecha (pp)", "estado_pdf":"Estado",
+                "inicio_plan":"Inicio", "fin_plan":"Fin", "supervisor":"Supervisor",
+                "hh_plan_calc":"HH plan", "hh_ganadas_calc":"HH ganadas",
                 "n_reportes":"N.º reportes", "ultimo_reporte":"Último reporte",
                 "descripcion_avance":"Último avance registrado",
             }
@@ -4501,7 +4679,7 @@ if page == "Reporte por supervisor":
             sig_raw = (str(sorted(report["id"].astype(str).tolist())) +
                        str(len(progress)) + supervisor_pick + ot_pick + status_pick + str(option_photo))
             sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()
-            if st.button("Generar PDF del supervisor", type="primary", use_container_width=True, key="v35_sup_generar_pdf"):
+            if st.button("Generar PDF del supervisor (modelo Quellaveco)", type="primary", use_container_width=True, key="v35_sup_generar_pdf"):
                 try:
                     with st.spinner("Preparando el informe... "):
                         if option_photo:
