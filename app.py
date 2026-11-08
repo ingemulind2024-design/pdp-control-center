@@ -17,8 +17,8 @@ import streamlit as st
 import extra_streamlit_components as stx
 from PIL import Image, ImageOps
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (
     Image as RLImage,
     PageBreak,
@@ -48,22 +48,49 @@ CUT_HOURS = (0, 7, 14, 19)
 st.markdown(
     """
     <style>
-    [data-testid="stSidebar"] {background:#082d55;}
-    [data-testid="stSidebar"] * {color:white;}
-    [data-testid="stMetric"] {
-        background:#fff;
-        border:1px solid #e5e7eb;
-        padding:14px;
-        border-radius:12px;
-        box-shadow:0 2px 10px rgba(0,0,0,.05);
+    :root { --mainin-navy:#0D2F53; --mainin-blue:#166099; --mainin-ink:#16283B; --mainin-muted:#637386; --mainin-line:#E1E8EF; }
+    [data-testid="stAppViewContainer"] {background:#F5F8FC;}
+    [data-testid="stHeader"] {background:rgba(245,248,252,.94);}
+    [data-testid="stSidebar"] {background:linear-gradient(180deg,#092746 0%,#0D345E 100%);}
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {gap:.38rem;}
+    [data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,[data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label,[data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] small {color:#F4F9FF !important;}
+    [data-testid="stSidebar"] [role="radiogroup"] label {padding:5px 6px; border-radius:8px;}
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover {background:rgba(255,255,255,.10);}
+    [data-testid="stSidebar"] [data-testid="stButton"] button {color:#0D2F53 !important; background:#FFFFFF; border-color:#CDD8E3;}
+    [data-testid="stSidebar"] hr {border-color:#385878;}
+    .block-container {max-width:1750px; padding-top:1.0rem; padding-bottom:2rem;}
+    h1,h2,h3 {color:#0D2F53 !important;letter-spacing:-.018em;}
+    h1 {font-size:1.8rem !important;}
+    h2 {font-size:1.42rem !important;}
+    h3 {font-size:1.13rem !important;}
+    [data-testid="stMetric"] {background:#FFFFFF; border:1px solid var(--mainin-line);padding:15px 17px;border-radius:12px;box-shadow:0 2px 8px rgba(13,47,83,.045);}
+    [data-testid="stMetricLabel"] {color:#50667A !important;}
+    [data-testid="stMetricValue"] {color:#0D2F53 !important;}
+    .mainin-header {border:1px solid #DCE7F2;border-left:5px solid #2271AD;border-radius:14px;background:linear-gradient(110deg,#FFF,#EFF6FC);padding:20px 22px 17px;margin:4px 0 20px;box-shadow:0 5px 19px rgba(13,47,83,.045);}
+    .mainin-eyebrow {font-size:.72rem;letter-spacing:.11em;font-weight:750;color:#2871AA;margin-bottom:7px;}
+    .mainin-headline {font-size:clamp(1.15rem,2.25vw,1.85rem);font-weight:800;color:#0D2F53;line-height:1.25;letter-spacing:-.022em;}
+    .mainin-subline {color:#61758B;font-size:.85rem;margin-top:7px;}
+    .mainin-section {background:linear-gradient(90deg,#0D345E,#165D91);padding:12px 15px;border-radius:10px;margin:11px 0 17px;color:white;font-weight:700;letter-spacing:.01em;}
+    .mainin-chip {display:inline-block;background:#E8F1FA;color:#155682;border-radius:999px;padding:5px 11px;font-size:.78rem;font-weight:700;margin:6px 0;}
+    [data-testid="stDataFrame"] {border-radius:10px;overflow:hidden;}
+    .stButton > button[kind="primary"],.stDownloadButton > button[kind="primary"] {background:#13578C !important;border-color:#13578C !important;color:white !important;}
+    .stButton > button[kind="primary"]:hover,.stDownloadButton > button[kind="primary"]:hover {background:#0D365E !important;}
+    [data-testid="stTextInput"] input,[data-testid="stSelectbox"] [data-baseweb="select"],
+    [data-testid="stTextArea"] textarea {border-radius:8px;}
+    @media(max-width:768px) {
+      .mainin-header {padding:14px 12px;margin-top:0;margin-bottom:12px;}
+      .mainin-subline {font-size:.76rem;}
+      .block-container {padding-left:.7rem;padding-right:.7rem;}
+      [data-testid="stMetric"] {padding:10px;}
+      [data-testid="stMetricValue"] {font-size:1.15rem;}
     }
-    .block-container {padding-top:1.15rem;}
-    h1,h2,h3 {color:#082d55;}
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 
 # ============================================================
 # AUTENTICACIÓN
@@ -2684,6 +2711,198 @@ def build_activity_report_pdf(
     return buffer.getvalue()
 
 
+
+# ============================================================
+# V35 - REPORTE OPERATIVO DE ACTIVIDADES POR SUPERVISOR
+# ============================================================
+def _sup_report_text(value, default="-"):
+    """Normaliza campos para pantalla y PDF sin exponer etiquetas HTML."""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    clean = str(value).strip()
+    return clean if clean else default
+
+
+def _supervisor_report_model(
+    selected_activities: pd.DataFrame,
+    all_ots: pd.DataFrame,
+    all_progress: pd.DataFrame,
+) -> pd.DataFrame:
+    """Solo lectura: no recalcula ni altera lo que ya existe en Supabase."""
+    result = build_activity_status(selected_activities, all_progress).copy()
+    if result.empty:
+        return result
+    result["id"] = result["id"].astype(str)
+    result["ot_id"] = result["ot_id"].astype(str)
+    result["avance_real"] = pd.to_numeric(result["avance_real"], errors="coerce").fillna(0).clip(0, 100)
+    result["supervisor"] = result.get("supervisor", pd.Series("", index=result.index)).fillna("SIN ASIGNAR").astype(str).str.strip().replace("", "SIN ASIGNAR")
+    result["estado"] = result["avance_real"].apply(
+        lambda p: "Culminada" if p >= 100 else ("En ejecución" if p > 0 else "No iniciada")
+    )
+    result["hh_plan_calc"] = pd.to_numeric(
+        result.get("hh_plan", pd.Series(0, index=result.index)), errors="coerce"
+    ).fillna(0).clip(lower=0)
+    result["hh_ganadas_calc"] = (result["hh_plan_calc"] * result["avance_real"] / 100).round(2)
+    result["n_reportes"] = 0
+    result["ultimo_reporte"] = "Sin reporte"
+
+    if not all_progress.empty and "actividad_id" in all_progress.columns:
+        p = all_progress.copy()
+        p["actividad_id"] = p["actividad_id"].astype(str)
+        counts = p.groupby("actividad_id").size()
+        result["n_reportes"] = result["id"].map(counts).fillna(0).astype(int)
+        if "fecha_registro" in p.columns:
+            p["fecha_orden"] = pd.to_datetime(p["fecha_registro"], errors="coerce", utc=True)
+            latest = p.sort_values("fecha_orden", kind="stable").groupby("actividad_id", sort=False).tail(1)
+            shown = latest.set_index("actividad_id")["fecha_orden"]
+            dates = pd.to_datetime(result["id"].map(shown), utc=True, errors="coerce")
+            result["ultimo_reporte"] = dates.dt.tz_convert(LIMA_TZ).dt.strftime("%d/%m/%Y %H:%M").fillna("Sin reporte")
+    if "id" in all_ots.columns and "ot" in all_ots.columns:
+        ot_catalog = all_ots[["id", "ot"]].copy()
+        ot_catalog["id"] = ot_catalog["id"].astype(str)
+        ot_catalog = ot_catalog.drop_duplicates("id")
+        result = result.merge(ot_catalog.rename(columns={"id":"ot_id", "ot":"numero_ot"}), on="ot_id", how="left", suffixes=("", "_ot"))
+    if "numero_ot" not in result.columns:
+        result["numero_ot"] = "S/OT"
+    result["numero_ot"] = result["numero_ot"].fillna("S/OT").astype(str)
+    result["descripcion_avance"] = result.get("descripcion_avance", pd.Series("", index=result.index)).fillna("").astype(str)
+    result["codigo_actividad"] = result.get("codigo_actividad", pd.Series("", index=result.index)).fillna("").astype(str)
+    result["descripcion"] = result.get("descripcion", pd.Series("", index=result.index)).fillna("").astype(str)
+    return result.sort_values(["supervisor", "numero_ot", "codigo_actividad"], kind="stable")
+
+
+def build_supervisor_summary_pdf(report_df: pd.DataFrame, supervisor_label: str) -> bytes:
+    """PDF consolidado con carátula gerencial y detalle de actividades.
+
+    Diseño compacto A4 horizontal, sin modificar datos ni exigir dependencias extra.
+    """
+    buffer = io.BytesIO()
+    navy = colors.HexColor("#0D345E")
+    ocean = colors.HexColor("#166099")
+    white = colors.white
+    slate = colors.HexColor("#526579")
+    faint = colors.HexColor("#EEF4F9")
+    border = colors.HexColor("#D7E2EC")
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=28, rightMargin=28, topMargin=26, bottomMargin=26)
+    sheet = getSampleStyleSheet()
+    tiny = ParagraphStyle("sup_tiny", parent=sheet["Normal"], fontName="Helvetica", fontSize=7.1, leading=9.3, textColor=navy)
+    small = ParagraphStyle("sup_small", parent=sheet["Normal"], fontName="Helvetica", fontSize=8.2, leading=11, textColor=navy)
+    heading = ParagraphStyle("sup_heading", parent=sheet["Heading2"], fontName="Helvetica-Bold", fontSize=13, leading=16, textColor=navy, spaceAfter=8)
+    title = ParagraphStyle("sup_title", parent=sheet["Heading1"], fontName="Helvetica-Bold", fontSize=17, leading=21, textColor=navy, spaceAfter=10)
+
+    def safe(value, limit=None):
+        content = html.escape(_sup_report_text(value, ""), quote=False).replace("\n", "<br/>")
+        if limit and len(content) > limit:
+            content = content[:limit].rsplit(" ", 1)[0] + "..."
+        return content or "-"
+
+    if report_df.empty:
+        raise ValueError("No hay actividades para generar el reporte.")
+
+    n = len(report_df)
+    finished = int((report_df["avance_real"] >= 100).sum())
+    active = int(((report_df["avance_real"] > 0) & (report_df["avance_real"] < 100)).sum())
+    pending = int((report_df["avance_real"] <= 0).sum())
+    reported = int((report_df["n_reportes"] > 0).sum())
+    progress_pct = float(report_df["avance_real"].mean())
+    hh_plan = float(report_df["hh_plan_calc"].sum())
+    hh_done = float(report_df["hh_ganadas_calc"].sum())
+    story = [
+        Paragraph("MAININ · UNIDAD MINERA ANTAPACCAY · MECÁNICA", small),
+        Spacer(1, 9),
+        Paragraph("REPORTE DE ACTIVIDADES POR SUPERVISOR", title),
+        Paragraph(f"<b>Supervisor:</b> {safe(supervisor_label)} &nbsp;&nbsp;&nbsp; <b>Fecha de emisión:</b> {pd.Timestamp.now(tz=LIMA_TZ):%d/%m/%Y %H:%M}", small),
+        Spacer(1, 14),
+    ]
+    metrics = [
+        ("OTs", f'{report_df["numero_ot"].nunique()}'),
+        ("Actividades", f"{n}"),
+        ("Avance", f"{progress_pct:.1f}%"),
+        ("Culminadas", f"{finished}"),
+        ("En ejecución", f"{active}"),
+        ("No iniciadas", f"{pending}"),
+        ("Con reporte", f"{reported}/{n}"),
+    ]
+    cells = [[Paragraph(f"<b>{safe(label)}</b><br/><font size='12'>{safe(value)}</font>", small) for label, value in metrics]]
+    table = Table(cells, colWidths=[112]*7)
+    table.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,-1),faint), ("BOX",(0,0),(-1,-1),.6,border),
+        ("INNERGRID",(0,0),(-1,-1),.5,border),
+        ("TOPPADDING",(0,0),(-1,-1),12),("BOTTOMPADDING",(0,0),(-1,-1),12),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+    ]))
+    story += [table, Spacer(1,10), Paragraph(f"<b>HH planificadas:</b> {hh_plan:,.1f} &nbsp;&nbsp; <b>HH ganadas:</b> {hh_done:,.1f} &nbsp;&nbsp; <b>Cobertura de reporte:</b> {(100*reported/n):.1f}%", small), Spacer(1,18), Paragraph("DETALLE DE ACTIVIDADES", heading)]
+
+    headers = ["OT", "Código", "Descripción de actividad", "Grupo", "Avance", "Estado", "HH plan", "Último reporte"]
+    rows = [[Paragraph(f"<b>{x}</b>", tiny) for x in headers]]
+    for _, row in report_df.iterrows():
+        rows.append([
+            Paragraph(safe(row.get("numero_ot"),32), tiny),
+            Paragraph(safe(row.get("codigo_actividad"),30), tiny),
+            Paragraph(safe(row.get("descripcion"),170), tiny),
+            Paragraph(safe(row.get("grupo"),37), tiny),
+            Paragraph(f'{float(row.get("avance_real",0)):.1f}%', tiny),
+            Paragraph(safe(row.get("estado"),26), tiny),
+            Paragraph(f'{float(row.get("hh_plan_calc",0)):.1f}', tiny),
+            Paragraph(safe(row.get("ultimo_reporte"),24), tiny),
+        ])
+    detail = Table(rows, colWidths=[74,65,250,60,54,80,55,130], repeatRows=1, hAlign="LEFT")
+    detail.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("TEXTCOLOR",(0,0),(-1,0),white),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[white,faint]),
+        ("LINEBELOW",(0,0),(-1,0),.8,ocean),
+        ("INNERGRID",(0,0),(-1,-1),.25,border),
+        ("BOX",(0,0),(-1,-1),.5,border),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),5),
+        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
+    ]))
+    # The header text itself is white, not only the table cell's default text.
+    rows[0] = [Paragraph(f'<font color="#FFFFFF"><b>{x}</b></font>',tiny) for x in headers]
+    # Update existing cell text; Table receives the same rows object.
+    for i, val in enumerate(rows[0]):
+        detail._cellvalues[0][i] = val
+    story.append(detail)
+    story.extend([Spacer(1,16), Paragraph("ÚLTIMOS AVANCES REGISTRADOS", heading)])
+    last_rows = [[Paragraph('<font color="#FFFFFF"><b>OT / Actividad</b></font>',tiny), Paragraph('<font color="#FFFFFF"><b>Descripción del último avance</b></font>',tiny), Paragraph('<font color="#FFFFFF"><b>Fecha</b></font>',tiny)]]
+    for _, row in report_df.iterrows():
+        last_rows.append([
+            Paragraph(safe(f'{row.get("numero_ot", "")} · {row.get("codigo_actividad", "")}',48),tiny),
+            Paragraph(safe(row.get("descripcion_avance", ""),460), tiny),
+            Paragraph(safe(row.get("ultimo_reporte"),25),tiny),
+        ])
+    last_table = Table(last_rows, colWidths=[155,493,120], repeatRows=1, hAlign="LEFT")
+    last_table.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),navy),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[white,faint]),
+        ("BOX",(0,0),(-1,-1),.5,border),
+        ("INNERGRID",(0,0),(-1,-1),.25,border),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),5),
+        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
+    ]))
+    story.append(last_table)
+
+    def page_footer(canvas, document):
+        canvas.saveState()
+        width, _ = landscape(A4)
+        canvas.setStrokeColor(border)
+        canvas.line(28,21,width-28,21)
+        canvas.setFont("Helvetica",7)
+        canvas.setFillColor(slate)
+        canvas.drawString(28,11,"MAININ · Antapaccay · Reporte de supervisión mecánica")
+        canvas.drawRightString(width-28,11,f"Página {document.page}")
+        canvas.restoreState()
+    doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
+    return buffer.getvalue()
+
+
 # ============================================================
 # SIDEBAR / MENÚ
 # ============================================================
@@ -2696,9 +2915,8 @@ with st.sidebar:
     except Exception:
         pass
 
-    st.caption(
-        "Unidad Minera Antapaccay"
-    )
+    st.markdown("**CONTROL CENTER · MAININ**")
+    st.caption("Unidad Minera Antapaccay · Mecánica")
     st.markdown("---")
 
     role = st.session_state.get(
@@ -2710,6 +2928,7 @@ with st.sidebar:
         menu_options = [
             "Dashboard ejecutivo",
             "Desempeño supervisores",
+            "Reporte por supervisor",
             "Registrar avance",
             "Detalle por OT",
             "Evidencias",
@@ -2725,9 +2944,18 @@ with st.sidebar:
             "Registrar avance"
         ]
 
+    menu_icons = {
+        "Dashboard ejecutivo": "▦", "Desempeño supervisores": "◈",
+        "Reporte por supervisor": "▤", "Registrar avance": "✎",
+        "Detalle por OT": "≡", "Evidencias": "▧",
+        "Informe diario": "◷", "Reporte PDF": "▣",
+        "Informe de Actividades": "▤", "Administrar OTs": "⚙",
+        "Agregar actividades Excel": "＋", "Exportar reporte": "⇩",
+    }
     page = st.radio(
         "Menú",
         menu_options,
+        format_func=lambda option: f"{menu_icons.get(option, '•')}  {option}",
     )
 
     st.markdown("---")
@@ -2757,17 +2985,21 @@ with st.sidebar:
         st.rerun()
 
 
-st.title(
-    "APLICATIVO DE CONTROL Y SEGUIMIENTO DE OTs"
-)
-st.caption(
-    "Unidad Minera Antapaccay · "
-    "Cada OT puede contener varias actividades con avance independiente."
+st.markdown(
+    """
+    <div class="mainin-header">
+      <div class="mainin-eyebrow">MAININ · CONTROL CENTER · ANTAPACCAY</div>
+      <div class="mainin-headline">Control y seguimiento de OTs</div>
+      <div class="mainin-subline">Especialidad Mecánica · Avance de actividades, evidencias, supervisores y reportabilidad</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 ADMIN_ONLY_PAGES = {
     "Dashboard ejecutivo",
     "Desempeño supervisores",
+    "Reporte por supervisor",
     "Detalle por OT",
     "Evidencias",
     "Informe diario",
@@ -4147,6 +4379,152 @@ if page == "Dashboard ejecutivo":
         )
 
 
+
+# ============================================================
+# REPORTE POR SUPERVISOR - V35 (MECÁNICA)
+# ============================================================
+if page == "Reporte por supervisor":
+    st.subheader("Reporte de actividades por supervisor")
+    st.caption("Seguimiento operativo y fotográfico de los trabajos mecánicos. Incluye todas las OTs asignadas al supervisor seleccionado.")
+
+    if activities.empty or ots.empty:
+        st.info("No hay actividades disponibles para este reporte.")
+    else:
+        supervisors = sorted(
+            [v for v in activities.get("supervisor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique().tolist() if v]
+        )
+        a, b, c = st.columns([2.3, 1.7, 1.5])
+        supervisor_pick = a.selectbox("Supervisor", ["TODOS"] + supervisors, key="v35_sup_supervisor")
+        working = activities.copy()
+        if supervisor_pick != "TODOS":
+            working = working[
+                working["supervisor"].fillna("").astype(str).str.strip() == supervisor_pick
+            ].copy()
+        otkeys = working["ot_id"].dropna().astype(str)
+        otlabels = ots.copy()
+        otlabels["id_text"] = otlabels["id"].astype(str)
+        otchoices = sorted(otlabels.loc[otlabels["id_text"].isin(otkeys),"ot"].fillna("S/OT").astype(str).unique().tolist())
+        ot_pick = b.selectbox("OT", ["TODAS"] + otchoices, key="v35_sup_ot")
+        if ot_pick != "TODAS":
+            allowed = set(otlabels.loc[otlabels["ot"].astype(str) == ot_pick,"id_text"])
+            working = working[working["ot_id"].astype(str).isin(allowed)].copy()
+        status_pick = c.selectbox("Estado", ["TODOS", "Culminada", "En ejecución", "No iniciada"], key="v35_sup_estado")
+        report = _supervisor_report_model(working, ots, progress)
+        if status_pick != "TODOS" and not report.empty:
+            report = report[report["estado"] == status_pick].copy()
+
+        if report.empty:
+            st.info("No se encontraron actividades para los filtros seleccionados.")
+        else:
+            total = len(report)
+            finished = int((report["avance_real"] >= 100).sum())
+            active = int(((report["avance_real"] > 0) & (report["avance_real"] < 100)).sum())
+            pending = int((report["avance_real"] <= 0).sum())
+            with_reports = int((report["n_reportes"] > 0).sum())
+            st.markdown('<div class="mainin-section">Resumen operativo por supervisor</div>', unsafe_allow_html=True)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("OTs", report["numero_ot"].nunique())
+            k2.metric("Actividades", total)
+            k3.metric("Avance promedio", f'{report["avance_real"].mean():.1f}%')
+            k4.metric("Cobertura de reporte", f'{100*with_reports/total:.1f}%')
+            k5, k6, k7, k8 = st.columns(4)
+            k5.metric("Culminadas", finished)
+            k6.metric("En ejecución", active)
+            k7.metric("No iniciadas", pending)
+            k8.metric("HH ganadas / plan", f'{report["hh_ganadas_calc"].sum():.1f} / {report["hh_plan_calc"].sum():.1f}')
+            st.markdown("### Avance por supervisor")
+            by_sup = report.groupby("supervisor", dropna=False).agg(
+                Actividades=("id", "size"),
+                Avance=("avance_real", "mean"),
+                Reportadas=("n_reportes", lambda x: int((x > 0).sum())),
+            ).reset_index()
+            by_sup["Cobertura (%)"] = (by_sup["Reportadas"] / by_sup["Actividades"] * 100).round(1)
+            by_sup["Avance"] = by_sup["Avance"].round(1)
+            if len(by_sup) > 1:
+                st.dataframe(
+                    by_sup.rename(columns={
+                        "supervisor": "Supervisor", "Avance": "Avance (%)",
+                        "Reportadas": "Actividades reportadas",
+                    }), use_container_width=True, hide_index=True,
+                )
+                fig = px.bar(
+                    by_sup.sort_values("Avance"), x="Avance", y="supervisor",
+                    orientation="h", text="Avance", color_discrete_sequence=["#13578C"],
+                )
+                fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                fig.update_layout(
+                    xaxis_title="Avance (%)",yaxis_title=None,
+                    xaxis_range=[0, 110],showlegend=False,
+                    height=max(250, 36*len(by_sup)+130),
+                    margin=dict(l=20,r=18,b=22,t=15),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            st.markdown("### Relación de actividades")
+            columns = [
+                "numero_ot", "codigo_actividad", "descripcion", "grupo", "supervisor",
+                "avance_real", "estado", "hh_plan_calc", "hh_ganadas_calc", "n_reportes", "ultimo_reporte", "descripcion_avance",
+            ]
+            labels = {
+                "numero_ot":"OT", "codigo_actividad":"Actividad", "descripcion":"Descripción",
+                "grupo":"Grupo", "supervisor":"Supervisor", "avance_real":"Avance (%)",
+                "estado":"Estado", "hh_plan_calc":"HH plan", "hh_ganadas_calc":"HH ganadas",
+                "n_reportes":"N.º reportes", "ultimo_reporte":"Último reporte",
+                "descripcion_avance":"Último avance registrado",
+            }
+            shown = report[[col for col in columns if col in report.columns]].rename(columns=labels)
+            st.dataframe(shown, use_container_width=True, hide_index=True)
+
+            st.markdown("### Actividades pendientes de seguimiento")
+            open_items = report[(report["avance_real"] < 100) | (report["n_reportes"] == 0)]
+            if open_items.empty:
+                st.success("No hay actividades pendientes para los filtros seleccionados.")
+            else:
+                pending_columns = ["numero_ot","codigo_actividad","descripcion","grupo","estado","avance_real","ultimo_reporte"]
+                st.dataframe(
+                    open_items[pending_columns].rename(columns=labels),
+                    use_container_width=True,hide_index=True,
+                )
+
+            st.markdown('<div class="mainin-section">Descargar informes</div>', unsafe_allow_html=True)
+            base_name = "".join(ch for ch in supervisor_pick if ch.isalnum() or ch in "-_ ").strip().replace(" ", "_") or "TODOS"
+            st.download_button(
+                "⇩ Descargar detalle en Excel (CSV)",
+                data=shown.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"supervisor_{base_name}_{datetime.now():%Y%m%d}.csv",
+                mime="text/csv",use_container_width=True,
+            )
+            option_photo = st.checkbox(
+                "Incluir informe fotográfico detallado (una página por actividad)",
+                value=False, key="v35_sup_photos",
+                help="Descarga independiente; puede tardar más si existen numerosas fotografías.",
+            )
+            sig_raw = (str(sorted(report["id"].astype(str).tolist())) +
+                       str(len(progress)) + supervisor_pick + ot_pick + status_pick + str(option_photo))
+            sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()
+            if st.button("Generar PDF del supervisor", type="primary", use_container_width=True, key="v35_sup_generar_pdf"):
+                try:
+                    with st.spinner("Preparando el informe... "):
+                        if option_photo:
+                            pdfbytes = build_activity_report_pdf(
+                                working[working["id"].astype(str).isin(report["id"])], ots, progress
+                            )
+                        else:
+                            pdfbytes = build_supervisor_summary_pdf(report, supervisor_pick)
+                    st.session_state["v35_sup_pdf_bytes"] = pdfbytes
+                    st.session_state["v35_sup_pdf_sig"] = sig
+                    st.success("Informe generado. Ya puedes descargarlo.")
+                except Exception as e:
+                    st.error(f"No fue posible generar el PDF: {e}")
+            if st.session_state.get("v35_sup_pdf_sig") == sig and st.session_state.get("v35_sup_pdf_bytes"):
+                st.download_button(
+                    "⇩ Descargar PDF del supervisor",
+                    data=st.session_state["v35_sup_pdf_bytes"],
+                    file_name=f"reporte_{base_name}_{'fotografico' if option_photo else 'operativo'}_{datetime.now():%Y%m%d}.pdf",
+                    mime="application/pdf",use_container_width=True,
+                )
+            st.caption("Los informes consultan los registros actuales de Supabase. No modifican avances ni evidencias existentes.")
+
+
 # ============================================================
 # DETALLE POR OT
 # ============================================================
@@ -4981,7 +5359,7 @@ if page == "Informe de Actividades":
     st.caption(
         "Genere un único PDF consolidado o un informe específico. "
         "Cada actividad se presenta en una página independiente con "
-        "detalle operativo y evidencias INICIO / DURANTE / FINAL."
+        "detalle operativo y evidencias históricas disponibles. Los nuevos reportes usan DURANTE / FINAL."
     )
 
     if ots.empty or activities.empty:
