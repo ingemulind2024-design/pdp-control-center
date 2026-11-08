@@ -2717,6 +2717,7 @@ with st.sidebar:
             "Reporte PDF",
             "Informe de Actividades",
             "Administrar OTs",
+            "Agregar actividades Excel",
             "Importar base",
             "Exportar reporte",
         ]
@@ -2774,6 +2775,7 @@ ADMIN_ONLY_PAGES = {
     "Reporte PDF",
     "Informe de Actividades",
     "Administrar OTs",
+    "Agregar actividades Excel",
     "Importar base",
     "Exportar reporte",
 }
@@ -5518,16 +5520,381 @@ if page == "Administrar OTs":
 
 
 # ============================================================
+# V33 - IMPORTACION INCREMENTAL SEGURA (SIN BORRAR AVANCES)
+# ============================================================
+def _inc_text(value):
+    """Convierte valores Excel en texto sin el sufijo artificial .0."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if float(value).is_integer():
+            return str(int(value))
+    value = str(value).strip()
+    if value.endswith(".0"):
+        try:
+            if float(value).is_integer():
+                return str(int(float(value)))
+        except (ValueError, OverflowError):
+            pass
+    return value
+
+
+def _inc_key(value):
+    """Clave de comparación, sin alterar los identificadores reales."""
+    return " ".join(_inc_text(value).split()).casefold()
+
+
+def _inc_decimal(value, default, column_name, row_number):
+    if _inc_text(value) == "":
+        return default
+    try:
+        number = float(value)
+        if not pd.notna(number) or number < 0:
+            raise ValueError()
+        return number
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(
+            f"Fila {row_number}: {column_name} debe ser un número no negativo."
+        )
+
+
+def _inc_date(value, column_name, row_number):
+    if _inc_text(value) == "":
+        return None
+    try:
+        # Algunos Excel convierten las fechas en números seriales.
+        if isinstance(value, (float, int)) and not isinstance(value, bool):
+            timestamp = pd.to_datetime(
+                value, unit="D", origin="1899-12-30", errors="raise"
+            )
+        elif isinstance(value, str) and len(value.strip()) >= 10 and value[4:5] == "-":
+            timestamp = pd.to_datetime(value, errors="raise")
+        else:
+            timestamp = pd.to_datetime(value, dayfirst=True, errors="raise")
+        if pd.isna(timestamp):
+            raise ValueError()
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_localize(None)
+        return timestamp.isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"Fila {row_number}: {column_name} contiene una fecha inválida.")
+
+
+def _inc_fetch_all(client, table_name, columns):
+    """Evita el límite por defecto de 1000 filas en Supabase."""
+    rows = []
+    offset = 0
+    while True:
+        segment = (
+            client.table(table_name)
+            .select(columns)
+            .range(offset, offset + 999)
+            .execute()
+            .data or []
+        )
+        rows.extend(segment)
+        if len(segment) < 1000:
+            break
+        offset += 1000
+    return rows
+
+
+def _inc_prepare(excel_activities, db_ots, db_activities):
+    """Prepara un listado únicamente para INSERT; jamás UPSERT/DELETE/UPDATE."""
+    ot_map = {}
+    ambiguous_ots = set()
+    for record in db_ots:
+        ot_key = _inc_key(record.get("ot"))
+        if not ot_key:
+            continue
+        if ot_key in ot_map and str(ot_map[ot_key]) != str(record.get("id")):
+            ambiguous_ots.add(ot_key)
+        else:
+            ot_map[ot_key] = record.get("id")
+
+    existing = {
+        (str(record.get("ot_id")), _inc_key(record.get("codigo_actividad")))
+        for record in db_activities
+    }
+    seen_excel = set()
+    candidates = []
+    preview = []
+    issues = 0
+    duplicates = 0
+    for row_index, (_, row) in enumerate(excel_activities.iterrows(), start=2):
+        ot = _inc_text(row.get("ot"))
+        code = _inc_text(row.get("codigo_actividad"))
+        description = _inc_text(row.get("descripcion"))
+        if not any([ot, code, description]):
+            continue
+        entry = {"Fila Excel": row_index, "OT": ot, "Actividad": code,
+                 "Descripción": description, "Resultado": "", "Motivo": ""}
+        if not ot or not code or not description:
+            entry["Resultado"] = "REVISAR"
+            entry["Motivo"] = "Faltan OT, código o descripción"
+            issues += 1
+        elif _inc_key(ot) in ambiguous_ots:
+            entry["Resultado"] = "REVISAR"
+            entry["Motivo"] = "Número de OT duplicado en Supabase"
+            issues += 1
+        elif _inc_key(ot) not in ot_map:
+            entry["Resultado"] = "REVISAR"
+            entry["Motivo"] = "La OT no existe; créala en Administrar OTs"
+            issues += 1
+        else:
+            ot_id = ot_map[_inc_key(ot)]
+            key = (str(ot_id), _inc_key(code))
+            if key in existing:
+                entry["Resultado"] = "EXISTE"
+                entry["Motivo"] = "No se modificará ni duplicará"
+                duplicates += 1
+            elif key in seen_excel:
+                entry["Resultado"] = "DUPLICADA EN EXCEL"
+                entry["Motivo"] = "Ya se incluyó antes en este archivo"
+                duplicates += 1
+            else:
+                try:
+                    payload = {
+                        "ot_id": ot_id,
+                        "codigo_actividad": code,
+                        "descripcion": description,
+                        "supervisor": _inc_text(row.get("supervisor")),
+                        "especialidad": _inc_text(row.get("especialidad")) or "MECANICA",
+                        "grupo": _inc_text(row.get("grupo")),
+                        "peso": _inc_decimal(row.get("peso"), 1.0, "peso", row_index),
+                        "inicio_plan": _inc_date(row.get("inicio_plan"), "inicio_plan", row_index),
+                        "fin_plan": _inc_date(row.get("fin_plan"), "fin_plan", row_index),
+                    }
+                    if payload["inicio_plan"] and payload["fin_plan"]:
+                        if payload["fin_plan"] < payload["inicio_plan"]:
+                            raise ValueError(
+                                f"Fila {row_index}: el fin planificado es anterior al inicio."
+                            )
+                    # Estos campos solo se envían si existen en el Excel.
+                    if "seccion" in excel_activities.columns:
+                        payload["seccion"] = _inc_text(row.get("seccion"))
+                    for numeric in ("personal", "duracion_h", "hh_plan"):
+                        if numeric in excel_activities.columns:
+                            payload[numeric] = _inc_decimal(
+                                row.get(numeric), 0.0, numeric, row_index
+                            )
+                    candidates.append(payload)
+                    seen_excel.add(key)
+                    entry["Resultado"] = "NUEVA"
+                    entry["Motivo"] = "Se agregará sin modificar los avances"
+                except ValueError as error:
+                    entry["Resultado"] = "REVISAR"
+                    entry["Motivo"] = str(error)
+                    issues += 1
+        preview.append(entry)
+    return candidates, pd.DataFrame(preview), issues, duplicates
+
+
+def _inc_excel_backup(ot_rows, activity_rows, report_rows):
+    """Respaldo de datos; las fotos siguen guardadas en Storage."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, rows in (
+            ("ots", ot_rows),
+            ("actividades", activity_rows),
+            ("avances_actividad", report_rows),
+        ):
+            df = pd.DataFrame(rows)
+            for col in df.columns:
+                df[col] = df[col].map(
+                    lambda value: json.dumps(value, ensure_ascii=False)
+                    if isinstance(value, (dict, list)) else
+                    (value.isoformat() if isinstance(value, (datetime, pd.Timestamp)) else value)
+                )
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    return output.getvalue()
+
+
+if page == "Agregar actividades Excel":
+    st.subheader("Agregar actividades desde Excel — sin reiniciar")
+    st.success(
+        "Esta función SOLO agrega las actividades nuevas. No elimina OTs, "
+        "no reemplaza actividades existentes y no modifica avances ni evidencias."
+    )
+    st.caption(
+        "Utilice su Excel actualizado con la hoja `actividades`. Puede incluir "
+        "todas las filas originales: las que ya existen se ignorarán. "
+        "La hoja `ots` es opcional y NO se utiliza para modificar las OTs existentes."
+    )
+
+    if supabase_admin is None:
+        st.error(
+            "Para importar desde Excel debe existir [supabase_admin] key "
+            "en los Secrets de Streamlit."
+        )
+    else:
+        st.markdown("#### Paso 1. Respaldo de seguridad")
+        st.caption(
+            "Descargue una copia de las OTs, actividades y avances ANTES de importar. "
+            "El respaldo contiene los datos y referencias a fotos; no los archivos de imagen."
+        )
+        if st.button("Preparar respaldo de datos", key="inc_prepare_backup"):
+            try:
+                backup_ots = _inc_fetch_all(supabase_admin, "ots", "*")
+                backup_activities = _inc_fetch_all(supabase_admin, "actividades", "*")
+                backup_reports = _inc_fetch_all(supabase_admin, "avances_actividad", "*")
+                st.session_state["inc_backup_data"] = _inc_excel_backup(
+                    backup_ots, backup_activities, backup_reports
+                )
+                st.session_state["inc_backup_counts"] = (
+                    len(backup_ots), len(backup_activities), len(backup_reports)
+                )
+            except Exception as exc:
+                st.error(f"No se pudo preparar el respaldo: {exc}")
+        if st.session_state.get("inc_backup_data"):
+            backup_counts = st.session_state["inc_backup_counts"]
+            st.caption(
+                f"Respaldo: {backup_counts[0]} OTs, "
+                f"{backup_counts[1]} actividades y {backup_counts[2]} reportes."
+            )
+            st.download_button(
+                "📥 Descargar respaldo Excel",
+                data=st.session_state["inc_backup_data"],
+                file_name=f"respaldo_antapaccay_{datetime.now():%Y%m%d_%H%M}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="inc_backup_download",
+            )
+
+        st.markdown("#### Paso 2. Seleccione el Excel actualizado")
+        file = st.file_uploader(
+            "Archivo Excel con las actividades faltantes",
+            type=["xlsx"],
+            key="incremental_excel_upload_v33",
+        )
+        if file is not None:
+            try:
+                workbook = pd.ExcelFile(io.BytesIO(file.getvalue()))
+                sheets = {sheet.strip().lower(): sheet for sheet in workbook.sheet_names}
+                if "actividades" not in sheets:
+                    raise ValueError("El Excel debe incluir una hoja llamada 'actividades'.")
+                source_df = pd.read_excel(
+                    workbook, sheet_name=sheets["actividades"],
+                    dtype={"ot": "string", "codigo_actividad": "string"},
+                )
+                source_df.columns = [str(c).strip().lower() for c in source_df.columns]
+                required = {"ot", "codigo_actividad", "descripcion"}
+                if not required.issubset(source_df.columns):
+                    raise ValueError(
+                        "Faltan columnas obligatorias: "
+                        + ", ".join(sorted(required - set(source_df.columns)))
+                    )
+
+                current_ots = _inc_fetch_all(supabase_admin, "ots", "id,ot")
+                current_activities = _inc_fetch_all(
+                    supabase_admin, "actividades", "id,ot_id,codigo_actividad"
+                )
+                new_rows, review, issues, duplicates = _inc_prepare(
+                    source_df, current_ots, current_activities
+                )
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Filas revisadas", len(review))
+                p2.metric("Nuevas actividades", len(new_rows))
+                p3.metric("Ya existentes / duplicadas", duplicates)
+                p4.metric("Filas por corregir", issues)
+
+                if not review.empty:
+                    st.dataframe(review, hide_index=True, use_container_width=True)
+                if issues:
+                    st.error(
+                        "Corrija las filas marcadas REVISAR y cargue el archivo corregido. "
+                        "La importación está deshabilitada para evitar omisiones."
+                    )
+                elif not new_rows:
+                    st.info("No hay actividades nuevas. No se realizará ningún cambio.")
+                else:
+                    st.info(
+                        "Los nuevos registros tendrán inicialmente 0% de avance. "
+                        "Por eso, el avance general y la Curva S pueden cambiar, "
+                        "pero los reportes y fotos históricos se conservan."
+                    )
+                    confirm = st.checkbox(
+                        f"Confirmo agregar únicamente {len(new_rows)} "
+                        "actividades nuevas, sin reemplazar información existente.",
+                        key="inc_confirm_v33",
+                    )
+                    if st.button(
+                        "✅ AGREGAR SOLO ACTIVIDADES NUEVAS",
+                        type="primary", use_container_width=True,
+                        disabled=not confirm,
+                        key="inc_import_v33",
+                    ):
+                        # Segunda verificación al momento del guardado para evitar
+                        # duplicados si otro usuario añadió actividades recientemente.
+                        fresh_ots = _inc_fetch_all(supabase_admin, "ots", "id,ot")
+                        fresh_activities = _inc_fetch_all(
+                            supabase_admin, "actividades", "id,ot_id,codigo_actividad"
+                        )
+                        validated, _, new_issues, _ = _inc_prepare(
+                            source_df, fresh_ots, fresh_activities
+                        )
+                        if new_issues:
+                            st.error(
+                                "La base cambió o el archivo contiene errores. "
+                                "Actualice la página y valide de nuevo."
+                            )
+                        elif not validated:
+                            st.info("Las actividades ya existen; no se insertó nada.")
+                        else:
+                            successes = 0
+                            failures = []
+                            progress_widget = st.progress(0, text="Agregando actividades...")
+                            # Inserción individual: si falla una actividad, no afecta
+                            # las demás y permite identificar el código exacto.
+                            for index, payload in enumerate(validated, start=1):
+                                try:
+                                    supabase_admin.table("actividades").insert(payload).execute()
+                                    successes += 1
+                                except Exception as exc:
+                                    failures.append(
+                                        f"{payload['codigo_actividad']} / "
+                                        f"OT ID {payload['ot_id']}: {exc}"
+                                    )
+                                progress_widget.progress(
+                                    index / len(validated),
+                                    text=f"Procesadas {index} de {len(validated)}",
+                                )
+                            invalidate()
+                            st.cache_data.clear()
+                            if successes:
+                                st.success(
+                                    f"Se agregaron {successes} actividades nuevas. "
+                                    "Los avances y fotos existentes no se modificaron."
+                                )
+                            if failures:
+                                st.error(
+                                    f"No se pudieron agregar {len(failures)} actividades. "
+                                    "Revise el detalle y vuelva a importar el mismo Excel; "
+                                    "las actividades ya insertadas se omitirán."
+                                )
+                                with st.expander("Ver errores de importación"):
+                                    for item in failures:
+                                        st.write(item)
+            except Exception as exc:
+                st.error(f"No fue posible revisar el Excel: {exc}")
+
+
+# ============================================================
 # IMPORTAR BASE
 # ============================================================
 if page == "Importar base":
     st.subheader(
-        "Importar / Reiniciar base PDP"
+        "REINICIO COMPLETO DE BASE (OPERACIÓN DESTRUCTIVA)"
     )
 
     st.warning(
-        "Esta opción reemplaza OTs, actividades y avances asociados. "
-        "Úsela únicamente para cargar una nueva PDP completa."
+        "PELIGRO: esta función ELIMINA las OTs existentes y puede borrar "
+        "actividades, avances y sus relaciones. NO la utilice para agregar "
+        "actividades faltantes. Vaya a 'Agregar actividades Excel'."
     )
 
     if supabase_admin is None:
