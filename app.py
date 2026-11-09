@@ -1232,16 +1232,6 @@ def render_s_curve(curve: pd.DataFrame):
         use_container_width=True,
     )
 
-    if (
-        "REAL_AJUSTADO" in curve.columns
-        and curve["REAL_AJUSTADO"].any()
-    ):
-        st.caption(
-            "Nota: la línea REAL incorpora ajustes históricos de los "
-            "cortes del 05/11 al 08/11/2026. Estos valores se aplican "
-            "solo a la gráfica; los reportes registrados, fotografías "
-            "y KPIs siguen proviniendo de Supabase."
-        )
 
 
 # ============================================================
