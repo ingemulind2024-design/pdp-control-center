@@ -661,6 +661,30 @@ def weighted_progress(activity_status: pd.DataFrame) -> float:
 
 
 # ============================================================
+# CURVA S - AJUSTES HISTÓRICOS SOLICITADOS (REAL)
+# ============================================================
+# Solo ajusta la visualización de la serie REAL en los cortes indicados.
+# No escribe en Supabase ni altera los registros de avance o las evidencias.
+# La serie PLAN continúa calculándose con las fechas programadas.
+AJUSTES_REAL_CURVA_S_2026 = {
+    "2026-11-05 14:00": 6.0,
+    "2026-11-05 19:00": 12.0,
+    "2026-11-06 00:00": 17.0,
+    "2026-11-06 07:00": 20.0,
+    "2026-11-06 14:00": 28.0,
+    "2026-11-06 19:00": 40.0,
+    "2026-11-07 00:00": 42.0,
+    "2026-11-07 07:00": 44.0,
+    "2026-11-07 14:00": 57.0,
+    "2026-11-07 19:00": 66.0,
+    "2026-11-08 00:00": 71.0,
+    "2026-11-08 07:00": 74.0,
+    "2026-11-08 14:00": 85.0,
+    "2026-11-08 19:00": 94.0,
+}
+
+
+# ============================================================
 # CURVA S
 # ============================================================
 def build_s_curve(
@@ -1005,7 +1029,28 @@ def build_s_curve(
             "REAL",
         ] = 0.0
 
+    # Aplicar los 14 ajustes históricos únicamente a cortes ya transcurridos.
+    # No se alteran el cálculo PLAN, la BD ni los KPIs basados en Supabase.
+    curva["REAL_AJUSTADO"] = False
+    fechas_corte = pd.to_datetime(curva["fecha"], errors="coerce")
+    for fecha_texto, porcentaje in AJUSTES_REAL_CURVA_S_2026.items():
+        corte = pd.Timestamp(fecha_texto)
+        mascara = fechas_corte.eq(corte) & curva["REAL"].notna()
+        if mascara.any():
+            curva.loc[mascara, "REAL"] = float(porcentaje)
+            curva.loc[mascara, "REAL_AJUSTADO"] = True
+
+    # La curva es acumulada: los cortes posteriores no deben retroceder.
+    indices_real = curva.index[curva["REAL"].notna()].tolist()
+    if indices_real:
+        curva.loc[indices_real, "REAL"] = (
+            pd.to_numeric(curva.loc[indices_real, "REAL"], errors="coerce")
+            .fillna(0).clip(0, 100).cummax()
+        )
+
     return curva
+
+
 def render_s_curve(curve: pd.DataFrame):
     if curve.empty:
         st.info(
@@ -1187,6 +1232,16 @@ def render_s_curve(curve: pd.DataFrame):
         use_container_width=True,
     )
 
+    if (
+        "REAL_AJUSTADO" in curve.columns
+        and curve["REAL_AJUSTADO"].any()
+    ):
+        st.caption(
+            "Nota: la línea REAL incorpora ajustes históricos de los "
+            "cortes del 05/11 al 08/11/2026. Estos valores se aplican "
+            "solo a la gráfica; los reportes registrados, fotografías "
+            "y KPIs siguen proviniendo de Supabase."
+        )
 
 
 # ============================================================
