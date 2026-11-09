@@ -93,6 +93,127 @@ st.markdown(
 )
 
 # ============================================================
+# INTERFAZ PDP QUELLAVECO ADAPTADA A ANTAPACCAY · MECÁNICA (V39)
+# Diseño visual; no modifica Supabase, reportes ni cálculo de KPIs.
+# ============================================================
+st.markdown(
+    """
+    <style>
+    :root {
+      --pdp-navy:#0A2948;
+      --pdp-navy2:#103F69;
+      --pdp-ink:#082847;
+      --pdp-light:#F5F8FC;
+      --pdp-line:#D9E5EF;
+      --pdp-blue:#1668EE;
+      --pdp-red:#E33232;
+      --pdp-green:#07975B;
+      --pdp-orange:#F38A08;
+    }
+    [data-testid="stAppViewContainer"] {background:linear-gradient(115deg,#F8FAFD 0%,#F3F7FE 100%);}
+    [data-testid="stHeader"] {background:rgba(248,250,253,.96);}
+    .block-container {max-width:1680px;padding-top:1.3rem;padding-bottom:3rem;}
+    .mainin-header.pdp-hero {
+      position:relative;overflow:hidden;margin:4px 0 15px;padding:21px 26px;
+      border:1px solid rgba(255,255,255,.13);border-left:none;border-radius:19px;
+      background:linear-gradient(112deg,#071E35 0%,#0B2E50 68%,#184D77 100%);
+      box-shadow:0 12px 30px rgba(8,36,67,.13);color:#FFF;
+    }
+    .pdp-hero::after {content:"";position:absolute;right:-90px;top:-95px;width:310px;height:310px;
+      border:1px solid rgba(110,188,249,.20);border-radius:50%;box-shadow:0 0 0 38px rgba(88,165,230,.035),0 0 0 78px rgba(88,165,230,.035);pointer-events:none;}
+    .pdp-hero .pdp-eyebrow {font-weight:850;letter-spacing:.16em;color:#8DC8FF;font-size:.60rem;margin-bottom:5px;}
+    .pdp-hero .pdp-title {font-weight:850;letter-spacing:-.035em;color:#FFF;font-size:clamp(1.30rem,2.65vw,2.05rem);line-height:1.16;position:relative;z-index:1;}
+    .pdp-hero .pdp-subtitle {font-size:.79rem;color:#C0DCF3;margin-top:6px;position:relative;z-index:1;}
+    .pdp-hero-layout {display:flex;align-items:center;justify-content:space-between;gap:14px;}
+    .pdp-chipbox {display:flex;flex-wrap:wrap;gap:7px;justify-content:flex-end;z-index:1;}
+    .pdp-chip {display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;
+      background:rgba(255,255,255,.08);border:1px solid rgba(174,212,240,.22);color:#EDF7FF;
+      border-radius:999px;font-size:.67rem;font-weight:760;padding:7px 11px;}
+    .pdp-live-dot {display:inline-block;width:7px;height:7px;background:#16C784;border-radius:50%;margin-right:6px;box-shadow:0 0 0 3px rgba(22,199,132,.12);}
+    .pdp-pagebar {display:flex;align-items:center;gap:14px;padding:15px 17px;margin-bottom:13px;
+      background:#FFF;border:1px solid #E0E8F1;border-radius:18px;box-shadow:0 4px 18px rgba(9,38,70,.035);}
+    .pdp-page-icon {display:grid;place-items:center;min-width:40px;height:40px;border-radius:12px;
+      color:#2265BA;background:#ECF4FF;border:1px solid #D4E4FF;font-size:1.25rem;font-weight:700;}
+    .pdp-page-label {font-size:.59rem;font-weight:800;letter-spacing:.16em;color:#617C99;}
+    .pdp-page-title {font-size:clamp(1.02rem,1.9vw,1.34rem);line-height:1.2;color:#0A2B4E;font-weight:850;letter-spacing:-.025em;}
+    .pdp-page-desc {font-size:.78rem;color:#687F99;margin-top:2px;}
+    .pdp-page-tag {margin-left:auto;border:1px solid #DCE8F4;border-radius:999px;padding:7px 12px;
+      font-size:.69rem;color:#264B72;font-weight:750;white-space:nowrap;box-shadow:0 3px 8px rgba(13,47,83,.035);}
+    .pdp-cut-strip {background:#F1FBF6;border:1px solid #9FDFC0;border-left:4px solid #049958;
+      padding:11px 14px;border-radius:11px;color:#0B6945;font-size:.73rem;line-height:1.65;margin:9px 0 13px;}
+    .pdp-cut-strip b {color:#055A3C;}
+    .pdp-cut-strip .pdp-cut-heading {font-weight:800;color:#008451;white-space:nowrap;}
+    .pdp-grid-kpi {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:13px 0 24px;}
+    .pdp-kpi {border:1px solid #D8E4EF;border-radius:17px;position:relative;background:#FFF;
+      min-width:0;min-height:95px;padding:15px 18px;box-shadow:0 7px 20px rgba(16,47,83,.045);overflow:hidden;}
+    .pdp-kpi:before {content:"";position:absolute;left:0;top:14px;bottom:14px;width:4px;border-radius:0 3px 3px 0;background:var(--pdp-accent,#4B759B);}
+    .pdp-kpi-label {font-size:.62rem;letter-spacing:.1em;color:#52718F;font-weight:800;text-transform:uppercase;}
+    .pdp-kpi-value {font-weight:850;font-size:clamp(1.35rem,2.3vw,1.84rem);letter-spacing:-.035em;line-height:1.16;color:#092A4C;margin:6px 0 5px;}
+    .pdp-kpi-desc {font-size:.72rem;color:#8090A5;}
+    .pdp-alert {border-radius:11px;padding:12px 15px;font-size:.88rem;margin:14px 0 20px;font-weight:650;}
+    .pdp-alert-critical {background:#FFF0F0;color:#8F2430;border-left:4px solid #E4384D;}
+    .pdp-alert-warning {background:#FFF9E9;color:#875A00;border-left:4px solid #F2A20C;}
+    .pdp-alert-ok {background:#EAF9F1;color:#06643E;border-left:4px solid #10A567;}
+    .pdp-alert-idle {background:#EFF4FA;color:#365C7A;border-left:4px solid #6D8EAE;}
+    .pdp-heading {margin:18px 0 13px;}
+    .pdp-heading-eyebrow {letter-spacing:.17em;font-size:.61rem;color:#3576BE;font-weight:850;}
+    .pdp-heading-title {font-size:1.37rem;line-height:1.25;color:#0C2A49;font-weight:850;margin-top:4px;}
+    .pdp-heading-desc {font-size:.77rem;color:#68819A;margin-top:6px;}
+    .pdp-heading:after {content:"";display:block;margin-top:10px;width:31px;height:2px;background:#61B0FF;border-radius:2px;}
+    /* Tarjetas normales y gráficos de las otras secciones mantienen tipografía corporativa. */
+    [data-testid="stMetric"] {border:1px solid #D8E4EF;border-radius:16px;box-shadow:0 7px 22px rgba(13,47,83,.045);}
+    [data-testid="stMetricValue"] {font-weight:830;letter-spacing:-.02em;}
+    div[data-testid="stPlotlyChart"] {border:1px solid #E0E7F1;border-radius:17px;
+      padding:9px 9px 4px;background:#FFF;box-shadow:0 5px 18px rgba(11,43,77,.025);}
+    @media(max-width:980px){
+      .pdp-grid-kpi {grid-template-columns:repeat(2,minmax(0,1fr));}
+      .pdp-hero-layout {align-items:flex-start;}
+      .pdp-chipbox {max-width:35%;}
+    }
+    @media(max-width:580px){
+      .block-container {padding-left:.55rem;padding-right:.55rem;}
+      .mainin-header.pdp-hero {padding:17px 15px;margin-top:3px;border-radius:14px;}
+      .pdp-hero-layout {flex-direction:column;gap:13px;}
+      .pdp-chipbox {max-width:100%;justify-content:flex-start;}
+      .pdp-pagebar {gap:10px;padding:12px;margin-bottom:10px;border-radius:13px;}
+      .pdp-page-tag {display:none;}
+      .pdp-grid-kpi {gap:8px;grid-template-columns:repeat(2,minmax(0,1fr));}
+      .pdp-kpi {padding:12px 11px;min-height:98px;border-radius:12px;}
+      .pdp-kpi-value {font-size:1.33rem;}
+      .pdp-kpi-desc {font-size:.64rem;}
+      .pdp-cut-strip {font-size:.68rem;}
+      .pdp-heading-title {font-size:1.17rem;}
+      div[data-testid="stPlotlyChart"] {padding:4px 2px;}
+    }
+    </style>
+    """, unsafe_allow_html=True,
+)
+
+
+def _pdp_kpi_card(label, value, help_text, accent="#4B759B"):
+    """Tarjeta de indicador para el dashboard (sin modificar cálculos)."""
+    return (
+        '<div class="pdp-kpi" style="--pdp-accent:' + accent + '">'
+        '<div class="pdp-kpi-label">' + html.escape(str(label)) + '</div>'
+        '<div class="pdp-kpi-value">' + html.escape(str(value)) + '</div>'
+        '<div class="pdp-kpi-desc">' + html.escape(str(help_text)) + '</div>'
+        '</div>'
+    )
+
+
+def _pdp_section_header(title, description="", eyebrow="PDP · ANTAPACCAY"):
+    """Encabezado de sección inspirado en Quellaveco."""
+    st.markdown(
+        '<div class="pdp-heading">'
+        '<div class="pdp-heading-eyebrow">' + html.escape(eyebrow) + '</div>'
+        '<div class="pdp-heading-title">' + html.escape(title) + '</div>'
+        + ('<div class="pdp-heading-desc">' + html.escape(description) + '</div>' if description else '')
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
 # AUTENTICACIÓN
 # ============================================================
 def load_users() -> dict:
@@ -1067,11 +1188,12 @@ def render_s_curve(curve: pd.DataFrame):
             mode="lines+markers+text",
             name="PLAN",
             line=dict(
+                color="#1465F2",
                 width=4,
                 shape="spline",
                 smoothing=0.8,
             ),
-            marker=dict(size=7),
+            marker=dict(size=7, color="#1465F2"),
             text=[
                 f"{value:.1f}%"
                 for value in curve["PLAN"]
@@ -1099,11 +1221,12 @@ def render_s_curve(curve: pd.DataFrame):
                 mode="lines+markers+text",
                 name="REAL",
                 line=dict(
+                    color="#E23232",
                     width=4,
                     shape="spline",
                     smoothing=0.8,
                 ),
-                marker=dict(size=8),
+                marker=dict(size=8, color="#E23232"),
                 text=[
                     f"{value:.1f}%"
                     for value in real_curve["REAL"]
@@ -1133,6 +1256,7 @@ def render_s_curve(curve: pd.DataFrame):
                 mode="markers+text",
                 marker=dict(
                     size=7,
+                    color="#1465F2",
                     symbol="circle",
                     line=dict(width=1),
                 ),
@@ -1157,6 +1281,7 @@ def render_s_curve(curve: pd.DataFrame):
                     mode="markers+text",
                     marker=dict(
                         size=7,
+                        color="#E23232",
                         symbol="circle",
                         line=dict(width=1),
                     ),
@@ -1173,12 +1298,19 @@ def render_s_curve(curve: pd.DataFrame):
                 )
             )
 
-        fig.add_vline(
-            x=live_row["fecha"],
-            line_width=1,
-            line_dash="dot",
-            annotation_text="AHORA",
-            annotation_position="top",
+        # add_vline de algunas versiones de Plotly falla con fechas Timestamp.
+        # add_shape/annotation conserva la guía vertical sin alterar la Curva S.
+        fig.add_shape(
+            type="line",
+            x0=live_row["fecha"],
+            x1=live_row["fecha"],
+            y0=0, y1=1, yref="paper",
+            line=dict(color="#06A463", width=1.5, dash="dot"),
+        )
+        fig.add_annotation(
+            x=live_row["fecha"], y=1, yref="paper",
+            text="AHORA", showarrow=False, yshift=15,
+            font=dict(color="#068A56", size=10),
         )
 
     tick_points = curve[
@@ -1198,20 +1330,27 @@ def render_s_curve(curve: pd.DataFrame):
         tick_text.append(label)
 
     fig.update_layout(
-        title="Curva S consolidada - Plan vs Real",
+        title=None,
         xaxis_title="Fecha / hora",
         yaxis_title="Acumulado (%)",
         yaxis=dict(
             range=[0, 108],
+            gridcolor="#E2EAF3",
+            zerolinecolor="#C7D7E6",
             ticksuffix="%",
         ),
         xaxis=dict(
+            showgrid=True,
+            gridcolor="#EEF2F8",
             tickmode="array",
             tickvals=tick_values,
             ticktext=tick_text,
         ),
         hovermode="x unified",
-        height=540,
+        height=485,
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(color="#45617E", size=11),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -1222,14 +1361,15 @@ def render_s_curve(curve: pd.DataFrame):
         margin=dict(
             l=20,
             r=20,
-            t=80,
-            b=90,
+            t=55,
+            b=76,
         ),
     )
 
     st.plotly_chart(
         fig,
         use_container_width=True,
+        config={"displayModeBar": False, "responsive": True},
     )
 
 
@@ -3203,14 +3343,39 @@ with st.sidebar:
         st.rerun()
 
 
+# Encabezado institucional para todos los módulos, sin tocar autenticación.
+_pdp_role = st.session_state.get("role", "reporter")
+_pdp_role_label = "ADMIN" if _pdp_role == "admin" else "SUPERVISOR"
 st.markdown(
-    """
-    <div class="mainin-header">
-      <div class="mainin-eyebrow">MAININ · CONTROL CENTER · ANTAPACCAY</div>
-      <div class="mainin-headline">Control y seguimiento de OTs</div>
-      <div class="mainin-subline">Especialidad Mecánica · Avance de actividades, evidencias, supervisores y reportabilidad</div>
-    </div>
-    """,
+    '<div class="mainin-header pdp-hero"><div class="pdp-hero-layout">'
+    '<div><div class="pdp-eyebrow">MAININ · PROJECT DELIVERY PLATFORM</div>'
+    '<div class="pdp-title">PDP Control Center · Antapaccay</div>'
+    '<div class="pdp-subtitle">Seguimiento ejecutivo y operativo de mantenimiento mecánico</div></div>'
+    '<div class="pdp-chipbox"><span class="pdp-chip"><i class="pdp-live-dot"></i>Operativo</span>'
+    '<span class="pdp-chip">' + html.escape(_pdp_role_label) + '</span>'
+    '<span class="pdp-chip">Mecánica</span></div></div></div>',
+    unsafe_allow_html=True,
+)
+_pdp_page_desc = {
+    "Dashboard ejecutivo": "Estado operativo, Curva S y desempeño de las actividades.",
+    "Desempeño supervisores": "Avance, disciplina de reportes y actividades por supervisor.",
+    "Reporte por supervisor": "Indicadores, actividades e informes de mantenimiento mecánico.",
+    "Registrar avance": "Registre el progreso y las evidencias desde la tabla de actividades.",
+    "Detalle por OT": "Consulte las OTs y sus actividades de mantenimiento.",
+    "Evidencias": "Revise las fotografías DURANTE y FINAL por actividad.",
+    "Informe diario": "Consolidado operativo diario de Antapaccay.",
+    "Reporte PDF": "Descarga de informes para control de ejecución.",
+    "Informe de Actividades": "Documentación y evidencias por OT y actividad.",
+    "Administrar OTs": "Administración y planificación de OTs mecánicas.",
+    "Agregar actividades Excel": "Importe actividades nuevas sin borrar los avances anteriores.",
+    "Exportar reporte": "Exportación y control de la información registrada.",
+}
+st.markdown(
+    '<div class="pdp-pagebar"><div class="pdp-page-icon">▣</div>'
+    '<div><div class="pdp-page-label">CONTROL OPERATIVO · MECÁNICA</div>'
+    '<div class="pdp-page-title">' + html.escape("Dashboard · Mecánica" if page == "Dashboard ejecutivo" else page) + '</div>'
+    '<div class="pdp-page-desc">' + html.escape(_pdp_page_desc.get(page, "Control Center Antapaccay")) + '</div></div>'
+    '<span class="pdp-page-tag">Mecánica</span></div>',
     unsafe_allow_html=True,
 )
 
@@ -3837,7 +4002,6 @@ if page == "Registrar avance":
 # DASHBOARD
 # ============================================================
 if page == "Dashboard ejecutivo":
-    st.subheader("Dashboard - Antapaccay")
 
     if activities.empty:
         st.info("No existen actividades cargadas.")
@@ -3898,109 +4062,72 @@ if page == "Dashboard ejecutivo":
         )
 
         # ========================================================
-        # ENCABEZADO OPERATIVO
+        # CORTE OPERATIVO Y TARJETAS 3×3 ESTILO QUELLAVECO
         # ========================================================
+        _pdp_stamp = pd.Timestamp.now(tz=LIMA_TZ).strftime("%d/%m/%Y %H:%M")
+        _pdp_strip = (
+            '<div class="pdp-cut-strip"><span class="pdp-cut-heading">'
+            '● CORTE OPERATIVO · ' + html.escape(_pdp_stamp) + '</span>'
+            '&nbsp;&nbsp; Vista: <b>Mecánica</b>'
+            '&nbsp; PLAN <b>' + f'{plan_now:.1f}%' + '</b>'
+            '&nbsp; REAL <b>' + f'{real_now:.1f}%' + '</b>'
+            '&nbsp; Desv. <b>' + f'{deviation:+.1f} pp' + '</b>'
+            '&nbsp; SPI <b>' + f'{spi:.2f}' + '</b>'
+            '&nbsp; OTs <b>' + str(total_ots) + '</b>'
+            '&nbsp; Actividades <b>' + str(total_activities) + '</b>'
+            '&nbsp; Culminadas <b>' + str(int(kpis.get("culminadas", 0))) + '</b>'
+            '&nbsp; En ejecución <b>' + str(int(kpis.get("parciales", 0))) + '</b>'
+            '&nbsp; No iniciadas <b>' + str(int(kpis.get("no_iniciadas", 0))) + '</b>'
+            '</div>'
+        )
+        st.markdown(_pdp_strip, unsafe_allow_html=True)
         st.caption(
-            f"Control operativo exclusivo de Antapaccay · "
-            f"{total_ots} OTs · "
-            f"{total_activities} actividades"
+            f"Control operativo exclusivo de Mecánica · "
+            f"{total_ots} OTs · {total_activities} actividades"
+        )
+        _pdp_cards = [
+            ("OTs", f"{total_ots}", "Órdenes de trabajo", "#577998"),
+            ("Actividades", f"{total_activities}", "Frente total de trabajo", "#577998"),
+            ("Avance", f"{real_now:.1f}%", "Progreso acumulado real", "#F49A10"),
+            ("Culminadas", f"{int(kpis.get('culminadas', 0))}", "Actividades al 100%", "#0AA269"),
+            ("En ejecución", f"{int(kpis.get('parciales', 0))}", "Con avance parcial", "#F49A10"),
+            ("No iniciadas", f"{int(kpis.get('no_iniciadas', 0))}", "Pendientes de arranque", "#DE4040"),
+            ("SPI", f"{spi:.2f}", "Desempeño plan vs real", "#DE4040" if spi < .95 else "#0AA269"),
+            ("HH plan", f"{hh_plan:,.0f}", "Horas hombre planificadas", "#577998"),
+            ("HH ganadas", f"{hh_earned:,.0f}", "Horas hombre reconocidas", "#0AA269"),
+        ]
+        st.markdown(
+            '<div class="pdp-grid-kpi">' + ''.join(
+                _pdp_kpi_card(*card) for card in _pdp_cards
+            ) + '</div>',
+            unsafe_allow_html=True,
         )
 
         # ========================================================
-        # KPIs PRINCIPALES - MISMO ESQUEMA DEL PDF CHINALCO
+        # SEMÁFORO Y CURVA S CON ESTILO QUELLAVECO
         # ========================================================
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
-
-        k1.metric(
-            "OTs",
-            f"{total_ots}",
-        )
-
-        k2.metric(
-            "Actividades",
-            f"{total_activities}",
-        )
-
-        k3.metric(
-            "Avance general",
-            f"{real_now:.1f}%",
-        )
-
-        k4.metric(
-            "Culminadas",
-            f"{int(kpis.get('culminadas', 0))}",
-        )
-
-        k5.metric(
-            "En ejecución",
-            f"{int(kpis.get('parciales', 0))}",
-        )
-
-        k6.metric(
-            "No iniciadas",
-            f"{int(kpis.get('no_iniciadas', 0))}",
-        )
-
-        st.write("")
-
-        k7, k8, k9 = st.columns(3)
-
-        k7.metric(
-            "SPI",
-            f"{spi:.2f}",
-            help=(
-                "SPI = Avance Real / Avance Plan al corte actual. "
-                "SPI < 1.00 indica atraso; SPI = 1.00 indica cumplimiento."
-            ),
-        )
-
-        k8.metric(
-            "HH planificadas",
-            f"{hh_plan:.0f}",
-        )
-
-        k9.metric(
-            "HH ganadas",
-            f"{hh_earned:.0f}",
-        )
-
-        # ========================================================
-        # SEMÁFORO DE DESVIACIÓN
-        # ========================================================
-        st.markdown("---")
-
         if plan_now <= 0:
-            st.info(
-                "⚪ PLAN AÚN NO INICIADO · "
-                "El SPI se habilitará cuando exista avance planificado."
-            )
-
-        elif spi < 0.85:
-            st.error(
-                f"🔴 DESVIACIÓN CRÍTICA · SPI {spi:.2f} · "
-                f"Plan {plan_now:.1f}% · Real {real_now:.1f}% · "
-                f"Brecha {deviation:+.1f} pp"
-            )
-
-        elif spi < 0.95:
-            st.warning(
-                f"🟠 DESVIACIÓN EN ALERTA · SPI {spi:.2f} · "
-                f"Plan {plan_now:.1f}% · Real {real_now:.1f}% · "
-                f"Brecha {deviation:+.1f} pp"
-            )
-
+            _pdp_alert_css = "pdp-alert-idle"
+            _pdp_alert_text = "PLAN AÚN NO INICIADO · El SPI estará disponible con avance planificado."
+        elif spi < .85:
+            _pdp_alert_css = "pdp-alert-critical"
+            _pdp_alert_text = f"🔴 DESVIACIÓN CRÍTICA · SPI {spi:.2f} · Plan {plan_now:.1f}% · Real {real_now:.1f}% · Brecha {deviation:+.1f} pp"
+        elif spi < .95:
+            _pdp_alert_css = "pdp-alert-warning"
+            _pdp_alert_text = f"🟠 DESVIACIÓN EN ALERTA · SPI {spi:.2f} · Plan {plan_now:.1f}% · Real {real_now:.1f}% · Brecha {deviation:+.1f} pp"
         else:
-            st.success(
-                f"🟢 DESEMPEÑO CONTROLADO · SPI {spi:.2f} · "
-                f"Plan {plan_now:.1f}% · Real {real_now:.1f}% · "
-                f"Brecha {deviation:+.1f} pp"
-            )
+            _pdp_alert_css = "pdp-alert-ok"
+            _pdp_alert_text = f"🟢 DESEMPEÑO CONTROLADO · SPI {spi:.2f} · Plan {plan_now:.1f}% · Real {real_now:.1f}% · Brecha {deviation:+.1f} pp"
+        st.markdown(
+            '<div class="pdp-alert ' + _pdp_alert_css + '">' +
+            html.escape(_pdp_alert_text) + '</div>',
+            unsafe_allow_html=True,
+        )
 
-        # ========================================================
-        # CURVA S - INMEDIATAMENTE DESPUÉS DE LOS KPIs
-        # ========================================================
-        st.markdown("---")
-        st.subheader("Curva S - Plan vs Real")
+        _pdp_section_header(
+            "Curva S · Plan vs Real",
+            "Avance por corte y seguimiento de la ejecución mecánica.",
+        )
         render_s_curve(curve)
 
         # ========================================================
@@ -4174,8 +4301,7 @@ if page == "Dashboard ejecutivo":
         # ========================================================
         # ESTADO DE ACTIVIDADES
         # ========================================================
-        st.markdown("---")
-        st.subheader("Estado de actividades")
+        _pdp_section_header("Estado de actividades")
 
         state_order = [
             "Culminadas",
@@ -4203,6 +4329,8 @@ if page == "Dashboard ejecutivo":
 
         fig_state.update_traces(
             textposition="outside",
+            marker_color=["#069B5C", "#FC9106", "#DB2828"],
+            textfont=dict(color="#102D4C", size=12),
         )
 
         ymax = max(
@@ -4215,10 +4343,14 @@ if page == "Dashboard ejecutivo":
             yaxis_title="N.º de actividades",
             yaxis=dict(
                 range=[0, ymax * 1.25],
+                gridcolor="#E3EBF3",
                 dtick=1 if ymax <= 12 else None,
             ),
-            height=400,
+            height=350,
             showlegend=False,
+            paper_bgcolor="#FFFFFF",
+            plot_bgcolor="#FFFFFF",
+            font=dict(color="#47617C", size=11),
             margin=dict(
                 l=40,
                 r=20,
@@ -4230,6 +4362,7 @@ if page == "Dashboard ejecutivo":
         st.plotly_chart(
             fig_state,
             use_container_width=True,
+            config={"displayModeBar": False, "responsive": True},
         )
 
         # ========================================================
